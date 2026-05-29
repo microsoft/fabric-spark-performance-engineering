@@ -40,7 +40,7 @@
 # orders, transactions) at the center, dimensions (parts, colors, themes, sets) on the
 # periphery.
 # 
-# ![LEGO data model](lego_diagram.png)
+# ![Lego Manufacturing and Sales Schema](https://github.com/mwc360/fabric-spark-performance-workshop/blob/main/assets/lego_erd.png?raw=true)
 # 
 # > 💡 The biggest fact table is `manufacturing_event` (~8 M rows / ~350 MB). Most performance
 # > exercises target it because it's the only table large enough to make Spark break a sweat at lab scale on a single node.
