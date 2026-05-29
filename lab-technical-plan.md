@@ -308,14 +308,25 @@ Each exercise targets a specific Spark optimization technique.
 ### Lab 4: Advanced Debugging — "The Factory Outage" (Capstone)
 
 Incident triage simulation. Attendees work in pairs through an escalating queue.
+**Structure:** 3 mandatory incidents (~12 min each) + 2 optional stretch incidents for fast finishers.
 
-| Priority | Incident | Symptoms | Root Cause | Fix |
-|---|---|---|---|---|
-| 🔴 | OOM crash on Daily Quality Report | Executor OOM joining `quality_inspection` with `production_order_large` | Explicit `broadcast(production_order_large)` but table grew to 500K rows | Remove broadcast hint; let AQE decide |
-| 🟠 | 10× slowdown on Customer 360 pipeline | 45 min instead of 5 min | `web_order` has 50K small files; stale stats → bad join strategy | `OPTIMIZE`; `ANALYZE TABLE` |
-| 🟡 | 200 GB disk spill on Inventory Reconciliation | Window function over `(PartNum, ColorId)` | 5 popular parts have millions of txns → huge partitions in window | Repartition with salting for hot keys; or incremental aggregation |
-| 🟡 | Scheduler overwhelmed on Parts Demand Forecast | Tasks take 2 sec to schedule, 0.1 sec to run | `repartition(PartNum, ColorId)` creates 50K+ empty/tiny partitions | Use `coalesce()` or `repartition(200)` |
-| 🟢 | Streaming job latency growing | Batch processing time increasing each micro-batch | Windowed aggregation state grows unbounded — no watermark | Add watermark on `Timestamp`; set state TTL |
+Each incident uses an **on-call ticket** format: symptom, SLA impact, cells to inspect,
+required evidence, optional hint, and expected remediation.
+
+**Mandatory Incidents:**
+
+| Priority | Incident | Symptoms | Root Cause | Diagnosis | Fix |
+|---|---|---|---|---|---|
+| 🔴 | OOM Crash — Daily Quality Report | Executor OOM joining `quality_inspection` with `production_order` | Explicit `broadcast(production_order)` but table grew to 500K rows | **Simulated** — pre-captured Spark UI + safe scaled-down validation. Read `explain()`, check `DESCRIBE DETAIL` for table size. | Remove `broadcast()` hint; let AQE choose sort-merge join |
+| 🟠 | 10× Slowdown — Customer 360 Pipeline | Multi-table join takes 45 min instead of 5 min | Two compounding issues: small files on `web_order` + stale stats causing wrong join strategy for `product_return` | `DESCRIBE DETAIL` (file count), `DESCRIBE HISTORY` (bad write), `EXPLAIN COST` (join strategy), `inputFiles()` (scan count). Must find BOTH causes. | `OPTIMIZE web_order`; `ANALYZE TABLE product_return COMPUTE STATISTICS` |
+| 🟡 | Mysterious Spill — Inventory Reconciliation | Window function spills 200 GB to disk | 5 popular parts have millions of txns → huge skewed partitions in window function | Task duration variance in Spark UI, `groupBy(spark_partition_id()).count()` to quantify skew | Repartition with salting for hot keys; or incremental aggregation |
+
+**Optional Stretch Incidents:**
+
+| Priority | Incident | Symptoms | Root Cause | Diagnosis | Fix |
+|---|---|---|---|---|---|
+| 🟡 | Partition Explosion — Parts Demand Forecast | Tasks take 2 sec to schedule, 0.1 sec to run | `repartition(PartNum, ColorId)` creates 50K+ partitions on high-cardinality composite key | `df.rdd.getNumPartitions()`, scheduler delay vs execution time in Spark UI | Use `coalesce()` or `repartition(200)` |
+| 🟢 | Delta Storage Regression — Overnight Perf Drop | Query 3× slower after yesterday's deployment | Bad batch append disabled auto-compaction and clustering, creating uncompacted small files | `DESCRIBE HISTORY`, `DESCRIBE DETAIL`, `inputFiles()`, check table properties | Restore table properties, run `OPTIMIZE`, verify data skipping |
 
 ---
 

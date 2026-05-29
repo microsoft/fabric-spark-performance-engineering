@@ -1,0 +1,12 @@
+{
+  "$schema": "https://developer.microsoft.com/json-schemas/fabric/gitIntegration/platformProperties/2.0.0/schema.json",
+  "metadata": {
+    "type": "SparkJobDefinition",
+    "displayName": "seed_lego_delta_tables",
+    "description": "Initialize bronze Delta tables from LakeGen LEGO data via ArcFlow"
+  },
+  "config": {
+    "version": "2.0",
+    "logicalId": "c8a90d31-ef6d-42ce-8d0d-f3d66216c98b"
+  }
+}
