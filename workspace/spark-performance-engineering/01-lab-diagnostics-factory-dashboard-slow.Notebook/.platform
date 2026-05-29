@@ -1,0 +1,12 @@
+{
+  "$schema": "https://developer.microsoft.com/json-schemas/fabric/gitIntegration/platformProperties/2.0.0/schema.json",
+  "metadata": {
+    "type": "Notebook",
+    "displayName": "01-lab-diagnostics-factory-dashboard-slow",
+    "description": "Lab 1 Diagnostics - The Factory Dashboard is Slow. Read-only reproduction notebook generated from repository workshop plan."
+  },
+  "config": {
+    "version": "2.0",
+    "logicalId": "2b3a8ac2-7ed8-b186-4e09-a4940b12d5a2"
+  }
+}

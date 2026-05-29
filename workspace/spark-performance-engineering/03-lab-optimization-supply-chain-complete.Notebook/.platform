@@ -1,0 +1,12 @@
+{
+  "$schema": "https://developer.microsoft.com/json-schemas/fabric/gitIntegration/platformProperties/2.0.0/schema.json",
+  "metadata": {
+    "type": "Notebook",
+    "displayName": "03-lab-optimization-supply-chain-complete",
+    "description": "Complete Lab 3 Optimization Patterns notebook with six-part structure, investigations, fixes, and validations."
+  },
+  "config": {
+    "version": "2.0",
+    "logicalId": "fe3beb86-9194-a992-4be2-d03f456f6043"
+  }
+}

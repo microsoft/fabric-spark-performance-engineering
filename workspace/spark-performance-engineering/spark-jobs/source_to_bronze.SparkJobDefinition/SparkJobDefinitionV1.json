@@ -1,0 +1,13 @@
+{
+  "executableFile": "unoptimized_elt.py",
+  "defaultLakehouseArtifactId": "28f1e957-ea23-49e8-846b-be0d8a67412e",
+  "mainClass": "",
+  "additionalLakehouseIds": [],
+  "retryPolicy": null,
+  "commandLineArguments": "--run-for-n-minutes 30 --max-events-per-second 40000 --buffer-write-seconds 1 --generator-threads 4",
+  "additionalLibraryUris": [
+    "pipeline_config.py"
+  ],
+  "language": "Python",
+  "environmentArtifactId": "c590c99e-e724-8404-41aa-8067abd8c7f3"
+}
