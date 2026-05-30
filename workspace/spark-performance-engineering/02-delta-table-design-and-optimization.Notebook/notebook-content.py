@@ -64,6 +64,21 @@
 # ---
 
 
+# MARKDOWN ********************
+
+# ---
+# 
+# ## OPTIONAL - Run `source_to_bronze_optimized`
+# 
+# The Spark Job Definition `source_to_bronze` that was trigged in `00-getting-started` intentionally disables best practice configurations to highlight the impact of suboptimal table layout and compaction strategies. Run the `source_to_bronze_optimized` Spark Job Definition to see the impact on table layout health after the completion of the exercises in this notebook.
+# 
+# ### 🎯 How to trigger it
+# 
+# 1. Go to the [source_to_bronze_optimized](https://app.powerbi.com/groups/$workspaceId/sparkjobdefinitions/$sparkJobDefinitionId?experience=fabric-developer) Spark Job Definition
+# 1. Click **Run** (top header ribbon). _Note: only click **Run** once. It takes ~5 seconds to show up as active in the run history._
+# 
+# Don't wait for it to succeed. Move on to the rest of the lab exercises while it runs.
+
 # CELL ********************
 
 %run _benchmark_utils
