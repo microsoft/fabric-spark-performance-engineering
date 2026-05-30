@@ -26,8 +26,9 @@
 
 # MARKDOWN ********************
 
-# # 🧱 **Module 2: Delta Table Configuration & Design**
-# ## "Fix the LEGO Lakehouse"
+# # 🧱 **Module 2: Delta Table Design & Optimization**
+# 
+# Learn how to identify common Delta table performance problems, apply the right optimization, and validate the impact with before-and-after benchmarks.
 # 
 # **Duration:** 45 minutes | **Level:** 300–400
 # 
@@ -85,6 +86,9 @@ from delta.tables import DeltaTable
 
 ORIG_SCHEMA = "bronze"        # original unoptimized tables (never modified)
 FAST_SCHEMA = "bronze_fast"       # shallow clones we'll fix during the lab
+
+# Disable Intelligent Cache to prevent impacting benchmark comparisons
+spark.conf.set('spark.synapse.vegas.useCache', False)
 
 if "_BenchmarkProxy" not in globals():
     raise NotImplementedError("_benchmark_utils was not run! Run the prior cell!")
@@ -267,7 +271,7 @@ print("   especially when scanning thousands of small files.")
 # 
 # # Exercise 1: Fix the Small Files Problem
 # 
-# **Table:** `manufacturing_event` — high-frequency IoT telemetry from the injection molding floor
+# **Table:** `inventory_transaction` — high-frequency order lines from the web.
 # 
 # **What's wrong:** The unoptimized pipeline wrote data via Spark Structured Streaming with no auto-compaction and no optimize-write. Every micro-batch created a new tiny Parquet file. The result: thousands of files, each just a few KB.
 # 
@@ -276,7 +280,7 @@ print("   especially when scanning thousands of small files.")
 # - File metadata (Parquet footer, Delta stats) is disproportionately large vs. data
 # - The Delta transaction log bloats with thousands of `AddFile` entries
 # 
-# **Fix:** [`OPTIMIZE`](https://learn.microsoft.com/fabric/data-engineering/delta-optimization-and-v-order?tabs=sparksql#optimize) — compacts small files into ~128 MB target files.
+# **Fix:** [`OPTIMIZE`](https://learn.microsoft.com/en-us/fabric/data-engineering/table-compaction?tabs=sparksql#optimize-command) — compacts small files into ~128 MB target files.
 # 
 # ---
 
@@ -286,10 +290,17 @@ print("   especially when scanning thousands of small files.")
 # 1️⃣ BENCHMARK — Capture baseline query time
 # ============================================================
 
-print("🐌 Running baseline query on manufacturing_event...\n")
+print("🐌 Running baseline query on web_order_line...\n")
 
 with benchmark_op("OPTIMIZE (compaction)", "before", spark):
-    part_query = spark.sql(f"SELECT part_num, SUM(cycle_time_ms) AS total_cycle_time FROM {FAST_SCHEMA}.manufacturing_event GROUP BY part_num").collect()
+    order_query = spark.sql(f"""
+        SELECT
+            set_num,
+            SUM(quantity) AS total_quantity,
+            SUM(extended_price) AS total_revenue,
+            AVG(unit_price) AS avg_price
+        FROM {FAST_SCHEMA}.web_order_line GROUP BY set_num
+        """).collect()
 
 # METADATA ********************
 
@@ -305,7 +316,7 @@ with benchmark_op("OPTIMIZE (compaction)", "before", spark):
 # ============================================================
 
 print("🔍 Table diagnostics:\n")
-metrics_1_before = show_metrics(f"{FAST_SCHEMA}.manufacturing_event", "before")
+metrics_1_before = show_metrics(f"{FAST_SCHEMA}.web_order_line", "before")
 
 if metrics_1_before["avg_file_kb"] < 1024:
     ratio = round(131072 / max(metrics_1_before["avg_file_kb"], 1))
@@ -313,7 +324,7 @@ if metrics_1_before["avg_file_kb"] < 1024:
     print(f"   ⚠️  Files are {ratio:,}× smaller than they should be")
 
 print("\n📋 DESCRIBE DETAIL:")
-display(spark.sql(f"DESCRIBE DETAIL {FAST_SCHEMA}.manufacturing_event").select("format", "numFiles", "sizeInBytes"))
+display(spark.sql(f"DESCRIBE DETAIL {FAST_SCHEMA}.web_order_line").select("format", "numFiles", "sizeInBytes"))
 
 # METADATA ********************
 
@@ -372,9 +383,9 @@ display(spark.sql(f"DESCRIBE DETAIL {FAST_SCHEMA}.manufacturing_event").select("
 # 1️⃣ FIX — Run OPTIMIZE to compact small files
 # ============================================================
 
-print("🔧 Running OPTIMIZE {FAST_SCHEMA}.manufacturing_event...\n")
+print("🔧 Running OPTIMIZE {FAST_SCHEMA}.web_order_line...\n")
 start = time.time()
-result = spark.sql(f"OPTIMIZE {FAST_SCHEMA}.manufacturing_event")
+result = spark.sql(f"OPTIMIZE {FAST_SCHEMA}.web_order_line")
 print(f"   Completed in {round(time.time() - start, 1)}s")
 display(result)
 
@@ -394,9 +405,16 @@ display(result)
 print("🚀 Running same query after OPTIMIZE...\n")
 
 with benchmark_op("OPTIMIZE (compaction)", "after", spark):
-    part_query_fast = spark.sql(f"SELECT part_num, SUM(cycle_time_ms) AS total_cycle_time FROM {FAST_SCHEMA}.manufacturing_event GROUP BY part_num").collect()
+    order_query = spark.sql(f"""
+        SELECT
+            set_num,
+            SUM(quantity) AS total_quantity,
+            SUM(extended_price) AS total_revenue,
+            AVG(unit_price) AS avg_price
+        FROM {FAST_SCHEMA}.web_order_line GROUP BY set_num
+        """).collect()
 
-metrics_1_after = show_metrics(f"{FAST_SCHEMA}.manufacturing_event", "after")
+metrics_1_after = show_metrics(f"{FAST_SCHEMA}.web_order_line", "after")
 
 # METADATA ********************
 
@@ -414,29 +432,6 @@ metrics_1_after = show_metrics(f"{FAST_SCHEMA}.manufacturing_event", "after")
 # > 📝 **Note:** `OPTIMIZE` creates new files but keeps old files for time travel. Run `VACUUM` to reclaim storage (default retention: 7 days).
 # 
 # ---
-
-# CELL ********************
-
-# 🧱 Let's see what optimized manufacturing data looks like!
-print("🏭 Top 10 Busiest Machines (by event count)\n")
-display(spark.sql(f"""
-    SELECT machine_id,
-           COUNT(*) AS total_events,
-           SUM(CASE WHEN defect_detected THEN 1 ELSE 0 END) AS defects,
-           ROUND(AVG(mold_temp), 1) AS avg_mold_temp,
-           ROUND(AVG(cycle_time_ms), 0) AS avg_cycle_ms
-    FROM {FAST_SCHEMA}.manufacturing_event
-    GROUP BY machine_id
-    ORDER BY total_events DESC
-    LIMIT 10
-"""))
-
-# METADATA ********************
-
-# META {
-# META   "language": "python",
-# META   "language_group": "synapse_pyspark"
-# META }
 
 # MARKDOWN ********************
 
@@ -558,7 +553,7 @@ display(commit_stats_agg)
 
 # Start from a clean compacted state
 spark.sql(f"OPTIMIZE {FAST_SCHEMA}.inventory_transaction")
-files_before = get_table_metrics(f"{FAST_SCHEMA}.manufacturing_event")["num_files"]
+files_before = get_table_metrics(f"{FAST_SCHEMA}.inventory_transaction")["num_files"]
 
 # Simulate a streaming micro-batch by appending data
 # Use repartition to mimic how streaming creates multiple partitions
@@ -566,10 +561,10 @@ BATCH_ROWS = 5000
 
 print(f"🐌 Appending {BATCH_ROWS:,} rows WITHOUT optimize write (repartitioned to 8 files)...\n")
 
-batch = spark.table(f"{FAST_SCHEMA}.manufacturing_event").limit(BATCH_ROWS).repartition(8)
-batch.write.format("delta").mode("append").saveAsTable(f"{FAST_SCHEMA}.manufacturing_event")
+batch = spark.table(f"{FAST_SCHEMA}.inventory_transaction").limit(BATCH_ROWS).repartition(8)
+batch.write.format("delta").mode("append").saveAsTable(f"{FAST_SCHEMA}.inventory_transaction")
 
-files_after_bad = get_table_metrics(f"{FAST_SCHEMA}.manufacturing_event")["num_files"]
+files_after_bad = get_table_metrics(f"{FAST_SCHEMA}.inventory_transaction")["num_files"]
 new_files_without_ow = files_after_bad - files_before
 print(f"   Files before append: {files_before:,}")
 print(f"   Files after append:  {files_after_bad:,}")
@@ -595,15 +590,8 @@ print(f"   ⚠️  New files created: {new_files_without_ow}")
 # CELL ********************
 
 # YOUR CODE HERE
-# Enable optimize write on manufacturing_event
+# Enable optimize write on inventory_transaction
 # spark.sql(f"ALTER TABLE ...")
-spark.sql(f"""
-    ALTER TABLE {FAST_SCHEMA}.manufacturing_event
-    SET TBLPROPERTIES (
-      'delta.autoOptimize.optimizeWrite' = 'true',
-      'delta.autoOptimize.autoCompact' = 'true'
-    )
-""")
 
 # METADATA ********************
 
@@ -621,7 +609,7 @@ spark.sql(f"""
 # 
 # ```python
 # spark.sql(f"""
-#     ALTER TABLE {FAST_SCHEMA}.manufacturing_event
+#     ALTER TABLE {FAST_SCHEMA}.inventory_transaction
 #     SET TBLPROPERTIES (
 #       'delta.autoOptimize.optimizeWrite' = 'true',
 #       'delta.autoOptimize.autoCompact' = 'true'
@@ -645,15 +633,15 @@ spark.sql(f"""
 # =======================================================================
 
 # Clean baseline
-spark.sql(f"OPTIMIZE {FAST_SCHEMA}.manufacturing_event")
-files_before_good = get_table_metrics(f"{FAST_SCHEMA}.manufacturing_event")["num_files"]
+spark.sql(f"OPTIMIZE {FAST_SCHEMA}.inventory_transaction")
+files_before_good = get_table_metrics(f"{FAST_SCHEMA}.inventory_transaction")["num_files"]
 
 print(f"🚀 Appending {BATCH_ROWS:,} rows WITH optimize write (same repartition to 8)...\n")
 
-batch = spark.table(f"{FAST_SCHEMA}.manufacturing_event").limit(BATCH_ROWS).repartition(8)
-batch.write.format("delta").mode("append").saveAsTable(f"{FAST_SCHEMA}.manufacturing_event")
+batch = spark.table(f"{FAST_SCHEMA}.inventory_transaction").limit(BATCH_ROWS).repartition(8)
+batch.write.format("delta").mode("append").saveAsTable(f"{FAST_SCHEMA}.inventory_transaction")
 
-files_after_good = get_table_metrics(f"{FAST_SCHEMA}.manufacturing_event")["num_files"]
+files_after_good = get_table_metrics(f"{FAST_SCHEMA}.inventory_transaction")["num_files"]
 new_files_with_ow = files_after_good - files_before_good
 
 print(f"   Files before append: {files_before_good:,}")
@@ -704,11 +692,9 @@ benchmarks["Exercise 2: Optimize Write"] = {
 # 
 # # Exercise 3: Liquid Clustering
 # 
-# **Table:** `inventory_transaction` (continuing from Exercise 2)
+# **Table:** `manufacturing_event`
 # 
-# **Columns:** `TransactionId`, `Timestamp`, `PartNum`, `ColorId`, `LineId`, `TransactionType`, `Quantity`, `ReferenceId`
-# 
-# **What's wrong:** Even after compaction, data files contain a random mix of all values. When you filter by `PartNum` or `TransactionType`, Spark must scan **every file** because the min/max file-level statistics overlap across all files — nothing can be skipped.
+# **What's wrong:** Even after compaction, data files contain a random mix of all values. When you filter by `part_num` or `transaction_type`, Spark must scan **every file** because the min/max file-level statistics overlap across all files — nothing can be skipped.
 # 
 # **Why it matters:**
 # - A query for one specific part number scans 100% of the data
@@ -726,17 +712,17 @@ benchmarks["Exercise 2: Optimize Write"] = {
 # ============================================================
 
 # Compact first so file layout is clean. Use a 1m targetFileSize to ensure enough files to demonstrate file skipping 
-spark.sql(f"ALTER TABLE {FAST_SCHEMA}.inventory_transaction SET TBLPROPERTIES ('delta.targetFileSize' = '1m')")
-spark.sql(f"OPTIMIZE {FAST_SCHEMA}.inventory_transaction")
-metrics_3_before = show_metrics(f"{FAST_SCHEMA}.inventory_transaction", "before clustering")
+spark.sql(f"ALTER TABLE {FAST_SCHEMA}.manufacturing_event SET TBLPROPERTIES ('delta.targetFileSize' = '1m')")
+spark.sql(f"OPTIMIZE {FAST_SCHEMA}.manufacturing_event")
+metrics_3_before = show_metrics(f"{FAST_SCHEMA}.manufacturing_event", "before clustering")
 
 print(f"\n🐌 Running selective query: WHERE color_id = 8...\n")
 
 query = spark.sql(f"""
-    SELECT transaction_type, COUNT(*) AS cnt, SUM(quantity) AS total_qty
-    FROM {FAST_SCHEMA}.inventory_transaction
+    SELECT part_num, COUNT(*) AS cnt, SUM(cycle_time_ms) AS total_cycle_time_ms
+    FROM {FAST_SCHEMA}.manufacturing_event
     WHERE color_id = 8
-    GROUP BY transaction_type
+    GROUP BY part_num
 """)
 with benchmark_op("Liquid Clustering", "before (no clustering)", spark):
     query.collect()
@@ -757,15 +743,15 @@ print(f"\n🔍 Files scanned in query: {len(query.inputFiles())}\n")
 # ============================================================
 
 print("🔧 Applying liquid clustering: CLUSTER BY (color_id)...\n")
-spark.sql(f"ALTER TABLE {FAST_SCHEMA}.inventory_transaction CLUSTER BY (color_id)")
+spark.sql(f"ALTER TABLE {FAST_SCHEMA}.manufacturing_event CLUSTER BY (color_id)")
 print("✅ Clustering columns set\n")
 
 print("Running OPTIMIZE to rewrite files with clustering layout...")
 start = time.time()
-optimize_metrics_df = spark.sql(f"OPTIMIZE {FAST_SCHEMA}.inventory_transaction FULL")
+optimize_metrics_df = spark.sql(f"OPTIMIZE {FAST_SCHEMA}.manufacturing_event FULL")
 print(f"   Completed in {round(time.time() - start, 1)}s")
 
-metrics_3_after = show_metrics(f"{FAST_SCHEMA}.inventory_transaction", "after clustering + OPTIMIZE")
+metrics_3_after = show_metrics(f"{FAST_SCHEMA}.manufacturing_event", "after clustering + OPTIMIZE")
 
 # METADATA ********************
 
@@ -1027,14 +1013,14 @@ print(f"   The original data files were NOT rewritten — massive write amplific
 # 
 # # Exercise 5: Data Skipping Stats on Wide Tables
 # 
-# **Table:** `wide_order_analysis` — a denormalized join of orders, customers, inventory, and product data
+# **Table:** `production_analysis` — a denormalized join of manufacturing events, production lines, molds, colors, parts, and part categories.
 # 
-# **What’s wrong:** Delta collects min/max file statistics for only the **first 32 columns** by default (`delta.dataSkippingNumIndexedCols = 32`). When a wide table has a filter column beyond position 32, Delta has no stats for it — and will **block you from clustering** on that column with `DELTA_CLUSTERING_COLUMN_MISSING_STATS`.
+# **What's wrong:** Delta collects min/max file statistics for only the **first 32 columns** by default (`delta.dataSkippingNumIndexedCols = 32`). When a wide table has a filter column beyond position 32, Delta has no stats for it — and will **block you from clustering** on that column with `DELTA_CLUSTERING_COLUMN_MISSING_STATS`.
 # 
 # **Why it matters:**
 # - Denormalized / wide tables are common in analytics lakehouses
 # - Without stats, data skipping is blind — every file is scanned
-# - Clustering requires stats on the clustering column — you can’t even enable it
+# - Clustering requires stats on the clustering column — you can't even enable it
 # - No warning until you try — queries silently scan everything
 # 
 # **Exercise flow:**
@@ -1052,116 +1038,11 @@ print(f"   The original data files were NOT rewritten — massive write amplific
 # 5⃣ SETUP — Create a wide denormalized table
 # ============================================================
 
-# Join several LEGO tables into a single wide table (35+ columns).
-# The target filter column (theme_name) will land PAST position 32.
-# Note: ArcFlow normalizes all column names to snake_case.
-
-# Disable cache to prevent caching from skewing the perf results
-spark.conf.set('spark.synapse.vegas.useCache', True)
-
-wide_df = spark.sql(f"""
-    SELECT
-        -- web_order columns (1-8)
-        wo.order_id,
-        wo.order_number,
-        wo.order_date,
-        wo.customer_id          AS wo_customer_id,
-        wo.shipping_country,
-        wo.source               AS order_source,
-        wo.order_total,
-        wo.generated_at         AS order_generated_at,
-
-        -- web_order_line columns (9-15)
-        wol.line_number,
-        wol.set_num,
-        wol.part_num            AS line_part_num,
-        wol.item_name,
-        wol.quantity             AS line_quantity,
-        wol.unit_price,
-        wol.extended_price,
-
-        -- customer columns (16-23)
-        c.name                  AS customer_name,
-        c.email,
-        c.country,
-        c.loyalty_tier,
-        c.member_since,
-        c.preferred_source,
-        c.organization_id       AS customer_org_id,
-        c.generated_at          AS customer_generated_at,
-
-        -- sets columns (24-29)
-        s.name                  AS set_name,
-        s.year                  AS set_year,
-        s.num_parts,
-        s.img_url               AS set_img_url,
-        s.theme_id,
-        s.generated_at          AS set_generated_at,
-
-        -- set_price_history columns (30-34)
-        sph.price,
-        sph.currency             AS price_currency,
-        sph.effective_from,
-        sph.effective_to,
-        sph.change_reason,
-
-        -- themes columns (35-37) — PAST THE 32-COLUMN BOUNDARY
-        t.name                  AS theme_name,
-        t.parent_id             AS theme_parent_id,
-        t.generated_at          AS theme_generated_at
-
-    FROM {ORIG_SCHEMA}.web_order_line wol
-    JOIN {ORIG_SCHEMA}.web_order wo      ON wol.order_id = wo.order_id
-    JOIN {ORIG_SCHEMA}.customer c        ON wo.customer_id = c.customer_id
-    LEFT JOIN {ORIG_SCHEMA}.sets s       ON wol.set_num = s.set_num
-    LEFT JOIN {ORIG_SCHEMA}.set_price_history sph ON s.set_num = sph.set_num
-    LEFT JOIN {ORIG_SCHEMA}.themes t     ON s.theme_id = t.id
-""")
-
-num_cols = len(wide_df.columns)
-print(f"\U0001f4d0 Wide table has {num_cols} columns")
-
-# Write as an UNCLUSTERED Delta table (no clustering yet!)
-WIDE_TABLE = "wide_order_analysis"
-
-spark.sql(f"DROP TABLE IF EXISTS {FAST_SCHEMA}.{WIDE_TABLE}")
-
-wide_df.write \
-    .format("delta") \
-    .option("delta.targetFileSize", "1m") \
-    .saveAsTable(f"{FAST_SCHEMA}.{WIDE_TABLE}")
-
-show_metrics(f"{FAST_SCHEMA}.{WIDE_TABLE}", "unclustered")
-
-# Show column positions
-print(f"\n\U0001f4cb Column positions:")
-for i, col in enumerate(wide_df.columns, 1):
-    marker = " \U0001f448 FILTER COLUMN (past position 32!)" if col == "theme_name" else ""
-    boundary = " \u2500\u2500 stats boundary \u2500\u2500" if i == 32 else ""
-    if i <= 3 or i >= 30 or col == "theme_name":
-        print(f"   {i:>3}. {col}{boundary}{marker}")
-    elif i == 4:
-        print(f"       ...")
-
-# METADATA ********************
-
-# META {
-# META   "language": "python",
-# META   "language_group": "synapse_pyspark"
-# META }
-
-# CELL ********************
-
-# ============================================================
-# 5⃣ SETUP — Create a wide denormalized table
-# ============================================================
-
 # Join LEGO manufacturing tables into a single wide table (35+ columns).
 # manufacturing_event is the high-frequency IoT fact table — the biggest in the lakehouse.
 # The target filter column (part_num) will land PAST position 32.
-# Note: ArcFlow normalizes all column names to snake_case.
 
-spark.conf.set('spark.synapse.vegas.useCache', True)
+spark.conf.set('spark.synapse.vegas.useCache', False)
 
 wide_df = spark.sql(f"""
     SELECT
@@ -1306,12 +1187,13 @@ print(f"\U0001f50d Filtering on part_num = '{sample_part}'")
 print(f"   part_num is at column position {wide_df.columns.index('part_num') + 1} (past the 32-col stats window)\n")
 
 # How many files does the query scan?
-total_files = spark.table(f"{FAST_SCHEMA}.{WIDE_TABLE}").selectExpr("input_file_name()").distinct().count()
-filtered_files = spark.sql(f"""
-    SELECT input_file_name() AS f
-    FROM {FAST_SCHEMA}.{WIDE_TABLE}
-    WHERE part_num = '{sample_part}'
-""").select("f").distinct().count()
+total_files = len(spark.table(f"{FAST_SCHEMA}.{WIDE_TABLE}").inputFiles())
+query_no_stats_unclustered = spark.sql(f"""
+        SELECT *
+        FROM {FAST_SCHEMA}.{WIDE_TABLE}
+        WHERE part_num = '{sample_part}'
+    """)
+filtered_files = len(query_no_stats_unclustered.inputFiles())
 
 print(f"\U0001f4c1 File scan analysis:")
 print(f"   Total files in table:       {total_files}")
@@ -1325,12 +1207,7 @@ if filtered_files >= total_files:
 
 # Baseline timing
 with benchmark_op("Data Skipping Stats", "before (no stats past col 32)", spark):
-    query_no_stats = spark.sql(f"""
-        SELECT *
-        FROM {FAST_SCHEMA}.{WIDE_TABLE}
-        WHERE part_num = '{sample_part}'
-    """)
-    display(query_no_stats)
+    display(query_no_stats_unclustered)
 
 # METADATA ********************
 
@@ -1362,7 +1239,7 @@ except Exception as e:
     # Extract the key error message
     if "DELTA_CLUSTERING_COLUMN_MISSING_STATS" in error_msg:
         print(f"   DELTA_CLUSTERING_COLUMN_MISSING_STATS")
-        print(f"   Clustering column 'theme_name' doesn't have statistics collected.")
+        print(f"   Clustering column 'part_num' isn't enabled for statistics collection.")
         print(f"\n\U0001f4a1 Why? Delta only collects min/max stats for the first 32 columns.")
         print(f"   part_num is at position {wide_df.columns.index('part_num') + 1} \u2014 outside the stats window.")
         print(f"   Without stats, clustering can't determine how to organize files.")
@@ -1400,7 +1277,7 @@ print(f"   part_num position: {wide_df.columns.index('part_num') + 1} \u2190 not
 # 1. Apply one of the 3 methods to customize columns indexed with stats:
 #     - `delta.dataSkippingNumIndexedCols` to `-1` (collect stats on ALL columns)
 #     - `delta.dataSkippingStatsColumns` to `part_num` (collect stats on ALL columns)
-#     - Move `part_num` within the first 32 columns (`ALTER TABLE ... ALTER COLUMN part_num AFTER ...`)
+#     - Move `part_num` within the first 32 columns (`ALTER TABLE ... ALTER COLUMN part_num [AFTER ... | FIRST]`)
 # 
 # 2. Run `OPTIMIZE FULL` to rewrite files with complete stats
 # 3. Enable `CLUSTER BY (part_num)`
@@ -1420,7 +1297,7 @@ WIDE_TABLE = "production_analysis"
 
 # Step 3: Rewrite files with complete stats
 # spark.sql(f"OPTIMIZE ... FULL")
-
+# Step 1: Tell Delta to collect stats on ALL columns
 
 # METADATA ********************
 
@@ -1440,7 +1317,7 @@ WIDE_TABLE = "production_analysis"
 # WIDE_TABLE = "production_analysis"
 # 
 # # Step 1: Tell Delta to collect stats on ALL columns
-# spark.sql(f"ALTER TABLE {FAST_SCHEMA}.{WIDE_TABLE} SET TBLPROPERTIES ('delta.dataSkippingNumIndexedCols' = '-1')")
+# spark.sql(f"ALTER TABLE {FAST_SCHEMA}.{WIDE_TABLE} ALTER COLUMN part_num FIRST")
 # 
 # # Step 2: Enable clustering
 # spark.sql(f"ALTER TABLE {FAST_SCHEMA}.{WIDE_TABLE} CLUSTER BY (part_num)")
@@ -1469,12 +1346,13 @@ WIDE_TABLE = "production_analysis"
 print(f"\U0001f680 Running same query: WHERE part_num = '{sample_part}'\n")
 
 # Check file pruning again
-total_files = spark.table(f"{FAST_SCHEMA}.{WIDE_TABLE}").selectExpr("input_file_name()").distinct().count()
-filtered_files = spark.sql(f"""
-    SELECT input_file_name() AS f
-    FROM {FAST_SCHEMA}.{WIDE_TABLE}
-    WHERE part_num = '{sample_part}'
-""").select("f").distinct().count()
+total_files = len(spark.table(f"{FAST_SCHEMA}.{WIDE_TABLE}").inputFiles())
+query_w_stats_clustered = spark.sql(f"""
+        SELECT *
+        FROM {FAST_SCHEMA}.{WIDE_TABLE}
+        WHERE part_num = '{sample_part}'
+    """)
+filtered_files = len(query_w_stats_clustered.inputFiles())
 
 print(f"\U0001f4c1 File scan analysis (after fix):")
 print(f"   Total files in table:       {total_files}")
@@ -1487,12 +1365,7 @@ if filtered_files < total_files:
 
 # Timing comparison
 with benchmark_op("Data Skipping Stats", "after (stats + clustering)", spark):
-    query_no_stats = spark.sql(f"""
-        SELECT *
-        FROM {FAST_SCHEMA}.{WIDE_TABLE}
-        WHERE part_num = '{sample_part}'
-    """)
-    display(query_no_stats)
+    display(query_w_stats_clustered)
 
 # METADATA ********************
 

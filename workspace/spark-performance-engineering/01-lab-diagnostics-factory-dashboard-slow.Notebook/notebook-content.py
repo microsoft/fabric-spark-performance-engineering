@@ -9,7 +9,7 @@
 # META   "dependencies": {
 # META     "lakehouse": {
 # META       "default_lakehouse": "28f1e957-ea23-49e8-846b-be0d8a67412e",
-# META       "default_lakehouse_name": "lego4",
+# META       "default_lakehouse_name": "lego",
 # META       "default_lakehouse_workspace_id": "7fc5eff4-7153-4da9-b909-54981a3ffcdb",
 # META       "known_lakehouses": [
 # META         {
@@ -33,6 +33,9 @@
 # **Workspace:** `dpns_2026_spark_performance`  
 # **Lakehouse:** `Lego`  
 # **Schema:** `bronze`
+# 
+# **🔄 Switch Experience:**  
+# Looking for the SQL version? Check out [01-lab-diagnostics-factory-dashboard-slow-sql](../01-lab-diagnostics-factory-dashboard-slow-sql/01-lab-diagnostics-factory-dashboard-slow-sql.ipynb)
 # 
 # The notebook intentionally runs inefficient read-only queries. It does not create, update, delete, optimize, vacuum, analyze, or write any lakehouse data.
 
@@ -69,33 +72,7 @@ import time
 import regex
 
 from pyspark.sql import functions as F
-from pyspark.sql import Observation, DataFrame
 from pyspark.sql.types import DoubleType
-
-SCHEMA = "bronze"
-NEW_SCHEMA = "lab1"
-LAB1_RESULTS = []
-
-
-def table_ref(name: str) -> str:
-    return f"`{SCHEMA}`.`{name}`"
-
-def _persist_and_count_df(self: DataFrame, schema: str, table: str) -> int:
-    obs_name = f"persist_and_count_{schema}_{table}"
-    observation = Observation(obs_name)
-    observed_df = self.observe(observation, F.count(F.lit(1)).alias("row_count"))
-    #observed_df.write.format("noop").mode("overwrite").save()
-    observed_df.collect() # Force evaluation to populate the observation
-    row_count = observation.get["row_count"]
-    return row_count
-     
-DataFrame.persist_and_count = _persist_and_count_df
-
-def record_result(prompt: str, status: str, evidence: dict) -> None:
-    row = {"prompt": prompt, "status": status, "evidence": evidence}
-    LAB1_RESULTS.append(row)
-    print("LAB1_RESULT\n" + json.dumps(row, default=str, indent=2))
-
 
 # Used for NEE fallback analysis
 import re
@@ -105,7 +82,6 @@ block_pattern = re.compile(
 op_pattern = re.compile(
     r'(?m)^\s*\+-\s*(?:\^\(\d+\)\s*)?(?P<op>[A-Za-z][A-Za-z0-9]*)\b'
 )
-
 
 def extract_nee_fallbacks(plan: str) -> dict:
     fallback_blocks = []
@@ -128,14 +104,10 @@ def extract_nee_fallbacks(plan: str) -> dict:
         "blocks": fallback_blocks,
     }
 
+spark:SparkSession = spark
 
 print("Spark application ID:", spark.sparkContext.applicationId)
 print("Current database:", spark.catalog.currentDatabase())
-print("Using schema:", SCHEMA)
-
-print("Resetting lab schema and tables...")
-spark.sql(f"DROP SCHEMA IF EXISTS {NEW_SCHEMA} CASCADE")
-spark.sql(f"CREATE SCHEMA {NEW_SCHEMA}")
 
 # Minimize snapshot generation overhead
 spark.conf.set('spark.microsoft.delta.parallelSnapshotLoading.enabled', True)
@@ -157,36 +129,38 @@ expected_tables = [
     "inventory_transaction", "quality_inspection", "production_order"
 ]
 
-available_tables = {row.tableName for row in spark.sql(f"SHOW TABLES IN `{SCHEMA}`").collect()}
+available_tables = {row.tableName for row in spark.sql(f"SHOW TABLES IN `bronze`").collect()}
 print("Available expected tables:")
 for name in expected_tables:
     print(f"  {name}: {name in available_tables}")
 
 missing = [name for name in expected_tables if name not in available_tables]
 if missing:
-    raise RuntimeError(f"Missing required Lab 1 tables in schema {SCHEMA}: {missing}")
+    raise RuntimeError(f"Missing required Lab 1 tables in schema bronze: {missing}")
 
 TABLE_METRICS = {}
 TABLE_METRICS['metrics'] = {
     "rows": "row_count",
     "numFiles": "num_files",
     "sizeBytes": "size_bytes",
+    "sizeMB": "size_mb",
     "avgFileMB": "avg_file_mb",
     "partitions": "num_partitions",
 }
 for name in expected_tables:
-    ref = table_ref(name)
+    ref = f"bronze.{name}"
     detail = spark.sql(f"DESCRIBE DETAIL {ref}").collect()[0].asDict()
     row_count = spark.table(ref).count()
     num_files = int(detail.get("numFiles") or 0)
     size_bytes = int(detail.get("sizeInBytes") or 0)
     avg_file_mb = (size_bytes / num_files / 1024 / 1024) if num_files else 0
     TABLE_METRICS[name] = {
-        "rows": row_count,
-        "numFiles": num_files,
-        "sizeBytes": size_bytes,
-        "avgFileMB": avg_file_mb,
-        "partitions": spark.table(ref).rdd.getNumPartitions(),
+        "rows": int(row_count),
+        "numFiles": int(num_files),
+        "sizeBytes": int(size_bytes),
+        "sizeMB": float(size_bytes / 1024 / 1024),
+        "avgFileMB": float(avg_file_mb),
+        "partitions": int(spark.table(ref).rdd.getNumPartitions()),
     }
 
 display(TABLE_METRICS)
@@ -221,11 +195,12 @@ display(TABLE_METRICS)
 
 # Display table metrics before benchmark
 print("\n=== Table Metrics: manufacturing_event ===")
-show_metrics(table_ref("manufacturing_event"), "baseline")
+show_metrics("bronze.manufacturing_event", "baseline")
 
 # Example of reading the data to find the latest date, which will be used for filtering in the benchmark queries
-mfg = spark.table(table_ref("manufacturing_event")).selectExpr("manufacturing_event.*")
+mfg = spark.table("bronze.manufacturing_event").selectExpr("manufacturing_event.*")
 latest_day = mfg.select(F.max(F.to_date("timestamp")).alias("d")).collect()[0]["d"]
+latest_day
 
 # METADATA ********************
 
@@ -242,20 +217,21 @@ latest_day = mfg.select(F.max(F.to_date("timestamp")).alias("d")).collect()[0]["
 
 print("🐌 Running baseline query on manufacturing_event...\n")
 
-result_q1 = (
-    mfg
-    .withColumn("event_day", F.substring(F.col("timestamp"), 1, 10))
-    .filter(F.col("event_day") == F.lit(str(latest_day)))
-    .groupBy("event_day", F.col("machine_id"))
-    .agg(
-        F.count("*").alias("events"),
-        F.sum(F.col("defect_detected").cast("int")).alias("defects"),
-        (F.sum(F.col("defect_detected").cast("int")) / F.count("*")).alias("defect_rate"),
+with benchmark_op("Predicate Pushdown", "before", spark):
+    result_q1 = (
+        mfg
+        .withColumn("event_day", F.substring(F.col("timestamp"), 1, 10))
+        .filter(F.col("event_day") == F.lit(str(latest_day)))
+        .groupBy("event_day", F.col("machine_id"))
+        .agg(
+            F.count("*").alias("events"),
+            F.sum(F.col("defect_detected").cast("int")).alias("defects"),
+            (F.sum(F.col("defect_detected").cast("int")) / F.count("*")).alias("defect_rate"),
+        )
+        .orderBy(F.desc("defect_rate"))
     )
-    .orderBy(F.desc("defect_rate"))
-    .benchmark("Predicate Pushdown", "before")
-)
-data = result_q1.toPandas()
+    data = result_q1.toPandas()
+
 display(data)
 
 # METADATA ********************
@@ -329,20 +305,21 @@ result_q1.explain(mode="formatted")
 # 1️⃣ FIX — Use Functions on the column instead of string manipulation to enable predicate pushdown
 # ==================================================================================================
 
-result_q1 = (
-        mfg
-        .filter(F.col("timestamp").startswith(F.lit(str(latest_day))))
-        .withColumn("event_day", F.substring(F.col("timestamp"), 1, 10))
-        .groupBy("event_day", F.col("machine_id").alias("machine_id"))
-        .agg(
-            F.count("*").alias("events"),
-            F.sum(F.col("defect_detected").cast("int")).alias("defects"),
-            (F.sum(F.col("defect_detected").cast("int")) / F.count("*")).alias("defect_rate"),
-        )
-        .orderBy(F.desc("defect_rate"))
-        .benchmark("Predicate Pushdown", "after")
-)
-data = result_q1.toPandas()
+with benchmark_op("Predicate Pushdown", "after", spark):
+    result_q1 = (
+            mfg
+            .filter(F.col("timestamp").startswith(F.lit(str(latest_day))))
+            .withColumn("event_day", F.substring(F.col("timestamp"), 1, 10))
+            .groupBy("event_day", F.col("machine_id").alias("machine_id"))
+            .agg(
+                F.count("*").alias("events"),
+                F.sum(F.col("defect_detected").cast("int")).alias("defects"),
+                (F.sum(F.col("defect_detected").cast("int")) / F.count("*")).alias("defect_rate"),
+            )
+            .orderBy(F.desc("defect_rate"))
+    )
+    data = result_q1.toPandas()
+
 display(data)
 
 # METADATA ********************
@@ -419,7 +396,7 @@ result_q1.explain(mode="formatted")
 
 # Display table metrics before benchmark
 print("\n=== Table Metrics: web_order ===")
-show_metrics(table_ref("web_order"), "baseline")
+show_metrics("bronze.web_order", "baseline")
 
 # METADATA ********************
 
@@ -453,25 +430,26 @@ def python_extract_day(timestamp_str):
     match = re.search(r'(\d{4}-\d{2}-\d{2})', str(timestamp_str))
     return match.group(1) if match else None
 
-orders = spark.table(table_ref("web_order")).selectExpr("web_order.*")
-exploded = orders.select(
-    F.col("customer_id"),
-    F.col("order_date"),
-    F.explode("order_lines").alias("line")
-)
-result_q2 = (
-    exploded
-    .withColumn("line_total", python_line_total("line.quantity", "line.unit_price", "line.extended_price"))
-    .withColumn("order_day", python_extract_day("order_date"))
-    .groupBy("customer_id", "order_day")
-    .agg(F.sum("line_total").alias("total_spend"), F.count("*").alias("line_count"))
-    .groupBy("customer_id")
-    .agg(F.sum("total_spend").alias("total_spend"), F.sum("line_count").alias("line_count"))
-    .orderBy(F.desc("total_spend"))
-    .limit(10)
-    .benchmark("Python UDF Overhead", "before")
-)
-data = result_q2.toPandas()
+with benchmark_op("Python UDF Overhead", "Python UDFs", spark):
+    orders = spark.table("bronze.web_order").selectExpr("web_order.*")
+    exploded = orders.select(
+        F.col("customer_id"),
+        F.col("order_date"),
+        F.explode("order_lines").alias("line")
+    )
+    result_q2 = (
+        exploded
+        .withColumn("line_total", python_line_total("line.quantity", "line.unit_price", "line.extended_price"))
+        .withColumn("order_day", python_extract_day("order_date"))
+        .groupBy("customer_id", "order_day")
+        .agg(F.sum("line_total").alias("total_spend"), F.count("*").alias("line_count"))
+        .groupBy("customer_id")
+        .agg(F.sum("total_spend").alias("total_spend"), F.sum("line_count").alias("line_count"))
+        .orderBy(F.desc("total_spend"))
+        .limit(10)
+    )
+    data = result_q2.toPandas()
+
 display(data)
 
 # METADATA ********************
@@ -551,25 +529,26 @@ line_total_col_simple = F.coalesce(
 
 order_day = F.regexp_extract("order_date", r'(\d{4}-\d{2}-\d{2})', 1).alias("order_day")
 
-orders = spark.table(table_ref("web_order")).selectExpr("web_order.*")
-exploded = orders.select(
-    F.col("customer_id"),
-    F.col("order_date"),
-    F.explode("order_lines").alias("line")
-)
-result_q2_fixed = (
-    exploded
-    .withColumn("line_total", line_total_col_simple)
-    .withColumn("order_day", order_day)
-    .groupBy("customer_id", "order_day")
-    .agg(F.sum("line_total").alias("total_spend"), F.count("*").alias("line_count"))
-    .groupBy("customer_id")
-    .agg(F.sum("total_spend").alias("total_spend"), F.sum("line_count").alias("line_count"))
-    .orderBy(F.desc("total_spend"))
-    .limit(10)
-    .benchmark("Python UDF Overhead", "after")
-)
-data = result_q2_fixed.toPandas()
+with benchmark_op("Python UDF Overhead", "Built-in Functions", spark):
+    orders = spark.table("bronze.web_order").selectExpr("web_order.*")
+    exploded = orders.select(
+        F.col("customer_id"),
+        F.col("order_date"),
+        F.explode("order_lines").alias("line")
+    )
+    result_q2_fixed = (
+        exploded
+        .withColumn("line_total", line_total_col_simple)
+        .withColumn("order_day", order_day)
+        .groupBy("customer_id", "order_day")
+        .agg(F.sum("line_total").alias("total_spend"), F.count("*").alias("line_count"))
+        .groupBy("customer_id")
+        .agg(F.sum("total_spend").alias("total_spend"), F.sum("line_count").alias("line_count"))
+        .orderBy(F.desc("total_spend"))
+        .limit(10)
+    )
+    data = result_q2_fixed.toPandas()
+
 display(data)
 
 # METADATA ********************
@@ -640,7 +619,7 @@ result_q2_fixed.explain(mode="formatted")
 
 # Display table metrics before benchmark
 print("\n=== Table Metrics: inventory_transaction ===")
-show_metrics(table_ref("inventory_transaction"), "baseline")
+show_metrics("bronze.inventory_transaction", "baseline")
 
 # METADATA ********************
 
@@ -657,27 +636,24 @@ show_metrics(table_ref("inventory_transaction"), "baseline")
 
 print("🐌 Running baseline query with driver-side collect...\n")
 
-inv = spark.table(table_ref("inventory_transaction")).select("line_id", "part_num", "quantity", "transaction_type")
-print(f"About to collect {TABLE_METRICS['inventory_transaction']['rows']} inventory rows to the driver.")
 
-start = time.time()
-collected = inv.collect()
-inventory_by_line = defaultdict(int)
-for row in collected:
-    qty = int(row["quantity"] or 0)
-    if row["transaction_type"] in ("CONSUMPTION", "ORDER_PICK", "SCRAP"):
-        qty = -abs(qty)
-    inventory_by_line[row["line_id"] or "UNKNOWN"] += qty
+with benchmark_op("Local Driver work", "before", spark):
+    inv = spark.table("bronze.inventory_transaction").select("line_id", "part_num", "quantity", "transaction_type")
+    print(f"About to collect {TABLE_METRICS['inventory_transaction']['rows']} inventory rows to the driver.")
+    collected = inv.collect()
+    inventory_by_line = defaultdict(int)
+    for row in collected:
+        qty = int(row["quantity"] or 0)
+        if row["transaction_type"] in ("CONSUMPTION", "ORDER_PICK", "SCRAP"):
+            qty = -abs(qty)
+        inventory_by_line[row["line_id"] or "UNKNOWN"] += qty
 
-# Create pandas DataFrame directly from Python dict
-import pandas as pd
-result_q3 = pd.DataFrame([
-    {"line_id": line_id, "net_quantity": qty} 
-    for line_id, qty in inventory_by_line.items()
-]).sort_values("net_quantity", ascending=False).reset_index(drop=True)
-elapsed_ms = (time.time() - start) * 1000
-
-benchmarks.setdefault("Local Driver work", {})["before"] = elapsed_ms
+    # Create pandas DataFrame directly from Python dict
+    import pandas as pd
+    result_q3 = pd.DataFrame([
+        {"line_id": line_id, "net_quantity": qty} 
+        for line_id, qty in inventory_by_line.items()
+    ]).sort_values("net_quantity", ascending=False).reset_index(drop=True)
 
 display(result_q3)
 
@@ -732,24 +708,25 @@ print(json.dumps({
 
 print("✅ Running fixed query with distributed Spark aggregation...\n")
 
-inv = spark.table(table_ref("inventory_transaction")).select("line_id", "part_num", "quantity", "transaction_type")
-result_q3_fixed = (
-    inv
-    .withColumn(
-        "signed_quantity",
-        F.when(
-            F.col("transaction_type").isin("CONSUMPTION", "ORDER_PICK", "SCRAP"),
-            -F.abs(F.col("quantity").cast("int"))
-        ).otherwise(F.col("quantity").cast("int"))
+with benchmark_op("Local Driver work", "after", spark):
+    inv = spark.table("bronze.inventory_transaction").select("line_id", "part_num", "quantity", "transaction_type")
+    result_q3_fixed = (
+        inv
+        .withColumn(
+            "signed_quantity",
+            F.when(
+                F.col("transaction_type").isin("CONSUMPTION", "ORDER_PICK", "SCRAP"),
+                -F.abs(F.col("quantity").cast("int"))
+            ).otherwise(F.col("quantity").cast("int"))
+        )
+        .groupBy("line_id")
+        .agg(F.sum("signed_quantity").alias("net_quantity"))
+        .orderBy(F.desc("net_quantity"))
     )
-    .groupBy("line_id")
-    .agg(F.sum("signed_quantity").alias("net_quantity"))
-    .orderBy(F.desc("net_quantity"))
-    .benchmark("Local Driver work", "after")
-)
 
-# Convert to pandas only for final display (small result set)
-data = result_q3_fixed.toPandas()
+    # Convert to pandas only for final display (small result set)
+    data = result_q3_fixed.toPandas()
+
 display(data)
 
 # METADATA ********************
@@ -806,7 +783,7 @@ print(json.dumps({
 
 # Display table metrics before benchmark
 print("\n=== Table Metrics: manufacturing_event ===")
-show_metrics(table_ref("manufacturing_event"), "baseline")
+show_metrics("bronze.web_order", "baseline")
 
 # METADATA ********************
 
@@ -823,36 +800,33 @@ show_metrics(table_ref("manufacturing_event"), "baseline")
 
 print("🐌 Running baseline with repeated scans (no caching)...\n")
 
-start = time.time()
+with benchmark_op("Repeated Scans", "before", spark):
+    mfg = spark.table(f"bronze.manufacturing_event").selectExpr("manufacturing_event.*")
+    #mfg = mfg.filter(F.col("defect_detected") == True)  # Focus on defective events
+    mfg = mfg.join(spark.table("bronze.colors"), F.col("color_id")==F.col("colors.id"))
+    mfg = mfg.join(spark.table("bronze.parts"), F.col("manufacturing_event.part_num")==F.col("parts.part_num"))
+    mfg = mfg.join(spark.table("bronze.part_categories").alias("p"), F.col("parts.part_cat_id")==F.col("p.id"))
+    mfg = mfg.groupBy("p.name", "defect_detected", "defect_type").count()
 
-mfg = spark.table(f"bronze.manufacturing_event").selectExpr("manufacturing_event.*")
-#mfg = mfg.filter(F.col("defect_detected") == True)  # Focus on defective events
-mfg = mfg.join(spark.table("bronze.colors"), F.col("color_id")==F.col("colors.id"))
-mfg = mfg.join(spark.table("bronze.parts"), F.col("manufacturing_event.part_num")==F.col("parts.part_num"))
-mfg = mfg.join(spark.table("bronze.part_categories").alias("p"), F.col("parts.part_cat_id")==F.col("p.id"))
-mfg = mfg.groupBy("p.name", "defect_detected", "defect_type").count()
+    defect_type_col = F.col("defect_type")
+    known_defects = ['color_streak', 'warp', 'sink_mark', 'short_shot']
 
-defect_type_col = F.col("defect_type")
-known_defects = ['color_streak', 'warp', 'sink_mark', 'short_shot']
+    # First action - triggers full scan
+    no_defect_df = mfg.filter(F.col("defect_detected") == False)
+    no_defects = no_defect_df.groupBy("p.name").agg(F.sum("count").alias("total_count")).collect()
 
-# First action - triggers full scan
-no_defect_df = mfg.filter(F.col("defect_detected") == False)
-no_defects = no_defect_df.groupBy("p.name").agg(F.sum("count").alias("total_count")).collect()
+    # Second action - triggers another full scan
+    defect_df = mfg.filter(defect_type_col.isin(known_defects))
+    defects = defect_df.groupBy("p.name").agg(F.sum("count").alias("total_count")).collect()
+
+    # Third action - triggers yet another full scan
+    quarantine_df = mfg.filter(~defect_type_col.isin(known_defects))
+    quarantine_rows = quarantine_df.groupBy("p.name").agg(F.sum("count").alias("total_count")).collect()
+    
+
 plan_1 = no_defect_df._jdf.queryExecution().executedPlan().toString()
-
-# Second action - triggers another full scan
-defect_df = mfg.filter(defect_type_col.isin(known_defects))
-defects = defect_df.groupBy("p.name").agg(F.sum("count").alias("total_count")).collect()
 plan_2 = defect_df._jdf.queryExecution().executedPlan().toString()
-
-# Third action - triggers yet another full scan
-quarantine_df = mfg.filter(~defect_type_col.isin(known_defects))
-quarantine_rows = quarantine_df.groupBy("p.name").agg(F.sum("count").alias("total_count")).collect()
 plan_3 = quarantine_df._jdf.queryExecution().executedPlan().toString()
-
-elapsed_ms = (time.time() - start) * 1000
-benchmarks.setdefault("Repeated Scans", {})["before"] = elapsed_ms
-
 print(f"No defects: {len(no_defects)} rows")
 print(f"Known defects: {len(defects)} rows")
 print(f"Quarantine: {len(quarantine_rows)} rows")
@@ -916,42 +890,37 @@ print(json.dumps({
 
 print("✅ Running fixed version with caching...\n")
 
-start = time.time()
+with benchmark_op("Repeated Scans", "after", spark):
+    mfg = spark.table(f"bronze.manufacturing_event").selectExpr("manufacturing_event.*")
+    #mfg = mfg.filter(F.col("defect_detected") == True)
+    mfg = mfg.join(spark.table("bronze.colors"), F.col("color_id")==F.col("colors.id"))
+    mfg = mfg.join(spark.table("bronze.parts"), F.col("manufacturing_event.part_num")==F.col("parts.part_num"))
+    mfg = mfg.join(spark.table("bronze.part_categories").alias("p"), F.col("parts.part_cat_id")==F.col("p.id"))
+    mfg = mfg.groupBy("p.name", "defect_detected", "defect_type").count()
 
-mfg = spark.table(f"bronze.manufacturing_event").selectExpr("manufacturing_event.*")
-#mfg = mfg.filter(F.col("defect_detected") == True)
-mfg = mfg.join(spark.table("bronze.colors"), F.col("color_id")==F.col("colors.id"))
-mfg = mfg.join(spark.table("bronze.parts"), F.col("manufacturing_event.part_num")==F.col("parts.part_num"))
-mfg = mfg.join(spark.table("bronze.part_categories").alias("p"), F.col("parts.part_cat_id")==F.col("p.id"))
-mfg = mfg.groupBy("p.name", "defect_detected", "defect_type").count()
+    # Cache before branching into multiple actions
+    mfg = mfg.cache()
 
-# Cache before branching into multiple actions
-mfg = mfg.cache()
+    defect_type_col = F.col("defect_type")
+    known_defects = ['color_streak', 'warp', 'sink_mark', 'short_shot']
 
-defect_type_col = F.col("defect_type")
-known_defects = ['color_streak', 'warp', 'sink_mark', 'short_shot']
+    # First action - triggers scan and populates cache
+    no_defect_df = mfg.filter(F.col("defect_detected") == False)
+    no_defects_fixed = no_defect_df.groupBy("p.name").agg(F.sum("count").alias("total_count")).collect()
 
-# First action - triggers scan and populates cache
-no_defect_df = mfg.filter(F.col("defect_detected") == False)
-no_defects_fixed = no_defect_df.groupBy("p.name").agg(F.sum("count").alias("total_count")).collect()
+    # Second action - reads from cache (no re-scan)
+    defect_df = mfg.filter(defect_type_col.isin(known_defects))
+    defects_fixed = defect_df.groupBy("p.name").agg(F.sum("count").alias("total_count")).collect()
+
+    # Third action - reads from cache (no re-scan)
+    quarantine_df = mfg.filter(~defect_type_col.isin(known_defects))
+    quarantine_rows_fixed = quarantine_df.groupBy("p.name").agg(F.sum("count").alias("total_count")).collect()
+
+    mfg.unpersist()
+
 plan_1_fixed = no_defect_df._jdf.queryExecution().executedPlan().toString()
-
-# Second action - reads from cache (no re-scan)
-defect_df = mfg.filter(defect_type_col.isin(known_defects))
-defects_fixed = defect_df.groupBy("p.name").agg(F.sum("count").alias("total_count")).collect()
 plan_2_fixed = defect_df._jdf.queryExecution().executedPlan().toString()
-
-# Third action - reads from cache (no re-scan)
-quarantine_df = mfg.filter(~defect_type_col.isin(known_defects))
-quarantine_rows_fixed = quarantine_df.groupBy("p.name").agg(F.sum("count").alias("total_count")).collect()
 plan_3_fixed = quarantine_df._jdf.queryExecution().executedPlan().toString()
-
-mfg.unpersist()
-
-elapsed_ms = (time.time() - start) * 1000
-benchmarks.setdefault("Repeated Scans", {})["after"] = elapsed_ms
-
-print_scenario("Repeated Scans")
 
 print(f"No defects: {len(no_defects_fixed)} rows")
 print(f"Known defects: {len(defects_fixed)} rows")
@@ -1040,9 +1009,9 @@ defect_df.explain(mode="formatted")
 
 # Display table metrics before benchmark
 print("\n=== Table Metrics: quality_inspection ===")
-show_metrics(table_ref("quality_inspection"), "baseline")
+show_metrics("bronze.web_order", "baseline")
 print("\n=== Table Metrics: production_order ===")
-show_metrics(table_ref("production_order"), "baseline")
+show_metrics("bronze.web_order", "baseline")
 
 # METADATA ********************
 
@@ -1073,17 +1042,17 @@ po = spark.table(f"bronze.production_order").select(
 estimated_pairs = TABLE_METRICS["quality_inspection"]["rows"] * TABLE_METRICS["production_order"]["rows"]
 print(f"Estimated Cartesian pairs: {estimated_pairs:,}")
 
-result_q5 = (
-    qi.crossJoin(po)
-    .groupBy("machine_id")
-    .agg(
-        F.count("*").alias("joined_rows"),
-        (F.sum("pass_count") / F.sum("sample_size")).alias("pass_rate")
+with benchmark_op("Cartesian Join", "before", spark):
+    result_q5 = (
+        qi.crossJoin(po)
+        .groupBy("machine_id")
+        .agg(
+            F.count("*").alias("joined_rows"),
+            (F.sum("pass_count") / F.sum("sample_size")).alias("pass_rate")
+        )
+        .orderBy(F.desc("joined_rows"))
     )
-    .orderBy(F.desc("joined_rows"))
-    .benchmark("Cartesian Join", "before")
-)
-rows_q5 = result_q5.toPandas()
+    rows_q5 = result_q5.toPandas()
 display(rows_q5)
 
 # METADATA ********************
@@ -1170,21 +1139,20 @@ po = spark.table(f"bronze.production_order").select(
     F.col("production_order.status").alias("order_status"),
 )
 
-# Fix: Use proper join with join condition instead of crossJoin
-result_q5_fixed = (
-    qi
-    .crossJoin(po)
-    .where(F.col("qi_production_order_id") == F.col("po_production_order_id"))
-    #.join(po, F.col("qi_production_order_id") == F.col("po_production_order_id"))  Alternative option
-    .groupBy("machine_id")
-    .agg(
-        F.count("*").alias("joined_rows"),
-        (F.sum("pass_count") / F.sum("sample_size")).alias("pass_rate")
+with benchmark_op("Cartesian Join", "after", spark):
+    result_q5_fixed = (
+        qi
+        .crossJoin(po)
+        .where(F.col("qi_production_order_id") == F.col("po_production_order_id"))
+        #.join(po, F.col("qi_production_order_id") == F.col("po_production_order_id"))  Alternative option
+        .groupBy("machine_id")
+        .agg(
+            F.count("*").alias("joined_rows"),
+            (F.sum("pass_count") / F.sum("sample_size")).alias("pass_rate")
+        )
+        .orderBy(F.desc("joined_rows"))
     )
-    .orderBy(F.desc("joined_rows"))
-    .benchmark("Cartesian Join", "after")
-)
-rows_q5_fixed = result_q5_fixed.toPandas()
+    rows_q5_fixed = result_q5_fixed.toPandas()
 display(rows_q5_fixed)
 
 # METADATA ********************
@@ -1257,7 +1225,7 @@ result_q5_fixed.explain(mode="formatted")
 
 # Display table metrics before benchmark
 print("\n=== Table Metrics: manufacturing_event ===")
-show_metrics(table_ref("manufacturing_event"), "baseline")
+show_metrics("bronze.manufacturing_event", "baseline")
 
 # METADATA ********************
 
@@ -1274,19 +1242,20 @@ show_metrics(table_ref("manufacturing_event"), "baseline")
 
 print("🐌 Running baseline with unnecessary cache...\n")
 
-mfg = spark.table(table_ref("manufacturing_event"))
-transformed = mfg.withColumn("event_day", F.substring(F.col("manufacturing_event.timestamp"), 1, 10))
-transformed.cache()  # Unnecessary cache - data is only used once
+with benchmark_op("Unnecessary Cache", "before", spark):
 
-result_q6 = (
-    transformed
-    .groupBy("event_day")
-    .agg(F.count("*").alias("events"))
-    .orderBy("event_day")
-    .benchmark("NEE Fallback", "before")
-)
-rows_q6 = result_q6.toPandas()
-transformed.unpersist()
+    mfg = spark.table("bronze.manufacturing_event")
+    transformed = mfg.withColumn("event_day", F.substring(F.col("manufacturing_event.timestamp"), 1, 10))
+    transformed.cache()  # Unnecessary cache - data is only used once
+
+    result_q6 = (
+        transformed
+        .groupBy("event_day")
+        .agg(F.count("*").alias("events"))
+        .orderBy("event_day")
+    )
+    rows_q6 = result_q6.toPandas()
+    transformed.unpersist()
 
 display(rows_q6)
 
@@ -1362,18 +1331,18 @@ result_q6.explain(mode="formatted")
 
 print("✅ Running fixed query without unnecessary cache...\n")
 
-mfg = spark.table(table_ref("manufacturing_event"))
-transformed = mfg.withColumn("event_day", F.substring(F.col("manufacturing_event.timestamp"), 1, 10))
-# No cache() - data flows directly through pipeline
+with benchmark_op("Unnecessary Cache", "after", spark):
 
-result_q6_fixed = (
-    transformed
-    .groupBy("event_day")
-    .agg(F.count("*").alias("events"))
-    .orderBy("event_day")
-    .benchmark("NEE Fallback", "after")
-)
-rows_q6_fixed = result_q6_fixed.toPandas()
+    mfg = spark.table("bronze.manufacturing_event")
+    transformed = mfg.withColumn("event_day", F.substring(F.col("manufacturing_event.timestamp"), 1, 10))
+
+    result_q6_fixed = (
+        transformed
+        .groupBy("event_day")
+        .agg(F.count("*").alias("events"))
+        .orderBy("event_day")
+    )
+    rows_q6_fixed = result_q6_fixed.toPandas()
 
 display(rows_q6_fixed)
 
