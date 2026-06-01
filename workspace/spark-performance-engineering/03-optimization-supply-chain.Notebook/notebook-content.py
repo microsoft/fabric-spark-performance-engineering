@@ -8,12 +8,12 @@
 # META   },
 # META   "dependencies": {
 # META     "lakehouse": {
-# META       "default_lakehouse": "28f1e957-ea23-49e8-846b-be0d8a67412e",
+# META       "default_lakehouse": "7bf7f9b4-2b98-469c-af05-be718abbabbe",
 # META       "default_lakehouse_name": "lego",
-# META       "default_lakehouse_workspace_id": "7fc5eff4-7153-4da9-b909-54981a3ffcdb",
+# META       "default_lakehouse_workspace_id": "e9637141-7f16-4635-aab2-f67159cb5df8",
 # META       "known_lakehouses": [
 # META         {
-# META           "id": "28f1e957-ea23-49e8-846b-be0d8a67412e"
+# META           "id": "7bf7f9b4-2b98-469c-af05-be718abbabbe"
 # META         }
 # META       ]
 # META     },
@@ -26,37 +26,38 @@
 
 # MARKDOWN ********************
 
-# #  **Module 3: LEGO Supply Chain Optimization Challenge**
-#
-# Learn how to diagnose and fix **Spark performance issues** in a realistic LEGO supply-chain analytics scenario. You'll work through billion-row joins, skewed keys, array-heavy transformations, shuffle storms, and streaming aggregations-measuring before/after impact with repeatable benchmarks.
-#
-# **Duration:** 60 minutes | **Level:** 300-400
-#
+# # 🏗️ **Module 3: LEGO Supply Chain Optimization Challenge**
+# 
+# Learn how to diagnose and fix **Spark performance issues** in a realistic LEGO supply‑chain analytics scenario. You’ll work through billion‑row joins, skewed keys, array-heavy transformations, shuffle storms, and streaming aggregations—measuring before/after impact with repeatable benchmarks.
+# 
+# **Duration:** 60 minutes | **Level:** 300–400
+# 
 # ---
-#
+# 
 # ### Scenario
-#
-# The LEGO manufacturing, e-commerce, and planning teams rely on a shared analytics platform to answer questions about **defect rates, customer behavior, Technic-heavy sets, color diversity, and streaming machine telemetry**.
-#
-# The current implementation works, but it suffers from common Spark anti-patterns:
+# 
+# The LEGO manufacturing, e‑commerce, and planning teams rely on a shared analytics platform to answer questions about **defect rates, customer behavior, Technic-heavy sets, color diversity, and streaming machine telemetry**.
+# 
+# The current implementation works, but it suffers from common Spark anti‑patterns:
 # - Shuffle-heavy joins on a massive `manufacturing_event` fact table
 # - Severe data skew on hot customers in `web_order_skewed`
 # - Unnecessary `explode` of large arrays for Technic set detection
-# - Join-then-aggregate patterns that create a "shuffle storm" on inventory data
+# - Join‑then‑aggregate patterns that create a "shuffle storm" on inventory data
 # - Streaming aggregations without watermarks, risking unbounded state growth
-#
-# **Your mission:** For each sub-scenario (3A-3E), identify the anti-pattern, apply an appropriate optimization (broadcast joins, salting, array functions, pre-aggregation, watermarks), and validate the improvement using the provided benchmarking utilities.
-#
+# 
+# **Your mission:** For each sub‑scenario (3A–3E), identify the anti‑pattern, apply an appropriate optimization (broadcast joins, salting, array functions, pre‑aggregation, watermarks), and validate the improvement using the provided benchmarking utilities.
+# 
 # ### Lab Pattern
-#
+# 
 # Every exercise follows the same steps:
-#
+# 
 # | Step | What you do |
 # |------|------------|
-# | [baseline] **Benchmark** | Run a query and capture the baseline time/metric |
-# | [diagnose] **Diagnose** | Inspect table metadata and query plans to prove the root cause |
-# | [fix] **Fix** | Apply the optimization (join strategy, salting, array rewrite, pre-aggregation, watermark) |
-# | [benchmark] **Re-benchmark** | Run the same test and compare against the baseline |
+# | 🐌 **Benchmark** | Run a query and capture the baseline time/metric |
+# | 🔍 **Diagnose** | Inspect table metadata and query plans to prove the root cause |
+# | 🔧 **Fix** | Apply the optimization (join strategy, salting, array rewrite, pre‑aggregation, watermark) |
+# | 🚀 **Re-benchmark** | Run the same test and compare against the baseline |
+
 
 # CELL ********************
 
@@ -125,30 +126,31 @@ for metric in TABLE_METRICS.values(): print("TABLE_METRIC|"+json.dumps(metric, s
 # MARKDOWN ********************
 
 # ## 3A Context - The Billion-Row Join
-#
+# 
 # In this scenario, the LEGO manufacturing team needs fast insight into **defect rates and cycle times** across massive volumes of production events.
-#
+# 
 # Each row in `manufacturing_event` represents a single machine cycle with a defect flag and cycle time in milliseconds. To understand **where defects are happening and which materials are at risk**, analysts need to join this high-volume fact table with two much smaller reference tables:
-#
-# - `production_order` - provides order status and other order-level attributes
-# - `parts` - provides material and category information for each part
-#
+# 
+# - `production_order` — provides order status and other order-level attributes
+# - `parts` — provides material and category information for each part
+# 
 # The goal is to compute **per-material defect counts and average cycle times** over billions of events so that operations can pinpoint problematic materials and production lines.
-#
+# 
 # ### Anti-Pattern: Shuffle-Heavy SortMergeJoins on a Huge Fact Table
-#
+# 
 # The baseline approach disables automatic broadcast joins and lets Spark pick `SortMergeJoin` for all joins:
-#
+# 
 # - `spark.sql.autoBroadcastJoinThreshold` is set to `-1`, **preventing Spark from broadcasting small dimension tables**
 # - Spark must **shuffle the giant `manufacturing_event` fact table** to perform `SortMergeJoin` with `production_order` and `parts`
 # - The physical plan shows `SortMergeJoin` operators and `Exchange hashpartitioning` on the fact table columns
-#
+# 
 # This is an anti-pattern for a classic **star-schema workload** (one very large fact table + small dimensions): it forces expensive shuffles of billions of rows when the small reference tables could be cheaply broadcast to all executors instead. The rest of the lab demonstrates how explicit `broadcast()` hints fix this and convert the plan to `BroadcastHashJoin`.
+
 
 # CELL ********************
 
 # ============================================================
-# 3A SETUP - Prepare source DataFrames
+# 3️⃣A SETUP — Prepare source DataFrames
 # ============================================================
 
 print("=== Table Metrics ===")
@@ -192,10 +194,10 @@ q3a_parts = (
 # CELL ********************
 
 # ============================================================
-# 3A PROBLEM - Baseline with broadcast disabled
+# 3️⃣A PROBLEM — Baseline with broadcast disabled
 # ============================================================
 
-print("[baseline] Running baseline query with broadcast joins disabled...\n")
+print("🐌 Running baseline query with broadcast joins disabled...\n")
 
 # Disable broadcast joins to force shuffle-heavy SortMergeJoin
 remember_conf("spark.sql.autoBroadcastJoinThreshold")
@@ -217,6 +219,7 @@ with benchmark_op("3A Inefficient Join", "No broadcast", spark):
 
 display(q3a_problem_rows)
 
+
 # METADATA ********************
 
 # META {
@@ -227,7 +230,7 @@ display(q3a_problem_rows)
 # CELL ********************
 
 # =================================================================================================
-# 3A INVESTIGATE - Prove the problem is shuffle-heavy SortMergeJoin
+# 3️⃣A INVESTIGATE — Prove the problem is shuffle-heavy SortMergeJoin
 # =================================================================================================
 
 # Extract physical plan
@@ -255,10 +258,10 @@ print(f"Contains Exchange hashpartitioning: {has_exchange}")
 # CELL ********************
 
 # ==================================================================================================
-# 3A FIX - Add explicit broadcast hints for dimension tables
+# 3️⃣A FIX — Add explicit broadcast hints for dimension tables
 # ==================================================================================================
 
-print("[fixed] Running fixed query with explicit broadcast hints...\n")
+print("✅ Running fixed query with explicit broadcast hints...\n")
 
 with benchmark_op("3A Inefficient Join", "Broadcast hint", spark):
 
@@ -289,7 +292,7 @@ restore_conf("spark.sql.autoBroadcastJoinThreshold")
 # CELL ********************
 
 # ============================================================
-# 3A CHECK-CHANGES - Compare metrics
+# 3️⃣A CHECK-CHANGES — Compare metrics
 # ============================================================
 
 # Extract plan from fixed query
@@ -316,77 +319,85 @@ print(f"Contains Exchange hashpartitioning: {fix_has_exchange}")
 
 # MARKDOWN ********************
 
-# ### Tip: What Just Happened? (3A: Broadcast Join)
-#
+# ### 💡 What Just Happened? (3A: Broadcast Join)
+# 
 # We re-enabled broadcast joins by adding explicit `broadcast()` hints to small dimension tables (`production_order` and `parts`). This eliminated expensive shuffle operations on the large fact table (`manufacturing_event`).
-#
+# 
 # **Before the fix:**
 # - Spark disabled broadcast joins (config set to `-1`)
 # - Used `SortMergeJoin` requiring full shuffle of manufacturing events (billions of rows)
-#
+# 
 # **After the fix:**
 # - Applied `broadcast()` hints to small tables (thousands of rows)
-# - Used `BroadcastHashJoin` - dimension tables broadcast to all executors
-#
+# - Used `BroadcastHashJoin` — dimension tables broadcast to all executors
+# 
 # ---
-#
-# **Plan: Query Plan Comparison** (optional inspection)
-#
-# **Problem Query Plan** (SortMergeJoin with shuffle)
-#
+# 
+# **📊 Query Plan Comparison** (optional inspection)
+# 
+# <details>
+#   <summary><strong>📋 Problem Query Plan</strong> (SortMergeJoin with shuffle)</summary>
+# 
 # Run this to see the baseline plan:
 # ```python
 # print(q3a_problem_plan)
 # ```
-#
+# 
 # Look for `SortMergeJoin` and `Exchange hashpartitioning` nodes showing the shuffle overhead.
-#
-# **Fixed Query Plan** (BroadcastHashJoin)
-#
+# 
+# </details>
+# 
+# <details>
+#   <summary><strong>✅ Fixed Query Plan</strong> (BroadcastHashJoin)</summary>
+# 
 # Run this to see the optimized plan:
 # ```python
 # print(explain_to_string(q3a_fix_df))
 # ```
-#
-# Look for `BroadcastHashJoin` and `BroadcastExchange` nodes - no shuffle of fact table.
-#
+# 
+# Look for `BroadcastHashJoin` and `BroadcastExchange` nodes — no shuffle of fact table.
+# 
+# </details>
+# 
 # ---
-#
-# > Note: **Key Takeaway:** For star-schema joins (large fact table + small dimensions), explicitly broadcast small tables (< 10MB) to avoid shuffling the fact table. Use `broadcast()` hints when auto-broadcast is disabled or threshold is too conservative.
+# 
+# > 📝 **Key Takeaway:** For star-schema joins (large fact table + small dimensions), explicitly broadcast small tables (< 10MB) to avoid shuffling the fact table. Use `broadcast()` hints when auto-broadcast is disabled or threshold is too conservative.
+
 
 # MARKDOWN ********************
 
 # ## 3B Context - The Skewed Customer
-#
+# 
 # In this scenario, the LEGO e-commerce team wants to understand **which customers generate the most orders and revenue** so they can target loyalty campaigns, special offers, and capacity planning.
-#
+# 
 # The source data is `web_order`, where each row represents a single online order with customer, total value, and order ID. To simulate real-world behavior where a few customers are extremely active (VIP buyers, resellers, bots, etc.), we derive a synthetic table `web_order_skewed`:
-#
+# 
 # - Start from `web_order`
 # - Identify the **top 5 most active customers** by order count
 # - Duplicate their orders multiple times to create **severely skewed keys**
-#
+# 
 # The business question is: _"Who are our top customers by order volume and revenue?"_
-#
+# 
 # ### Anti-Pattern: Aggregation on Severely Skewed Keys
-#
+# 
 # The baseline query joins `web_order_skewed` with `customer` and then aggregates directly by customer:
-#
+# 
 # - A few hot customers now own **a massive fraction of the rows**
 # - Grouping by `customer.name` sends **most of the data for those keys to a single or very few partitions**
 # - Some tasks finish quickly, while the task(s) handling hot customers become **stragglers**
-#
+# 
 # This is a classic **data skew** anti-pattern:
-#
+# 
 # - Parallelism is limited by the most skewed keys
 # - One or a handful of partitions become huge, causing long-running tasks and potential OOM
-#
+# 
 # The rest of the lab shows how to mitigate this using **manual salting**, join hints, and **Adaptive Query Execution (AQE)** so that work is spread evenly across executors while preserving correct results.
+
 
 # CELL ********************
 
 # ============================================================
-# 3B SETUP - Create skewed customer dataset
+# 3️⃣B SETUP — Create skewed customer dataset
 # ============================================================
 
 print("=== Table Metrics ===")
@@ -429,10 +440,10 @@ spark.conf.set("spark.sql.adaptive.advisoryPartitionSizeInBytes", "64MB")
 # CELL ********************
 
 # ============================================================
-# 3B PROBLEM - Baseline aggregation with skewed keys
+# 3️⃣B PROBLEM — Baseline aggregation with skewed keys
 # ============================================================
 
-print("[baseline] Running aggregation on skewed customer data...\n")
+print("🐌 Running aggregation on skewed customer data...\n")
 
 with benchmark_op("Skewed Join", "baseline", spark):
     q3b_problem_df = (
@@ -457,7 +468,7 @@ display(q3b_problem_rows)
 # CELL ********************
 
 # =================================================================================================
-# 3B INVESTIGATE - Measure data skew ratio
+# 3️⃣B INVESTIGATE — Measure data skew ratio
 # =================================================================================================
 
 # Plot distribution of orders per customer to demonstrate skew
@@ -488,10 +499,10 @@ plt.show()
 # CELL ********************
 
 # ==================================================================================================
-# 3B FIX - Apply salting to distribute skewed keys
+# 3️⃣B FIX — Apply salting to distribute skewed keys
 # ==================================================================================================
 
-print("[fixed] Running aggregation with key salting (16 buckets)...\n")
+print("✅ Running aggregation with key salting (16 buckets)...\n")
 
 # Too large => too much overhead; too small => doesn't solve skew. 16 is a common starting point for salting.
 # Iterate through experimentation to find the right balance for your data and cluster!
@@ -541,10 +552,10 @@ display(q3b_fix_salted_rows)
 # CELL ********************
 
 # ==================================================================================================
-# 3B FIX - Apply Join hints
+# 3️⃣B FIX — Apply Join hints
 # ==================================================================================================
 
-print("[fixed] Running aggregation with skew hint optimization...\n")
+print("✅ Running aggregation with skew hint optimization...\n")
 
 with benchmark_op("Skewed Join", "Hint", spark):
     q3b_fix_hint_df = (
@@ -570,10 +581,10 @@ display(q3b_fix_hint_rows)
 # CELL ********************
 
 # ==================================================================================================
-# 3B FIX - Apply AQE skew join optimization
+# 3️⃣B FIX — Apply AQE skew join optimization
 # ==================================================================================================
 
-print("[fixed] Running aggregation with AQE skew join optimization...\n")
+print("✅ Running aggregation with AQE skew join optimization...\n")
 
 with benchmark_op("Skewed Join", "AQE", spark):
     spark.conf.set("spark.sql.adaptive.enabled", "true")
@@ -615,72 +626,73 @@ restore_conf("spark.sql.adaptive.advisoryPartitionSizeInBytes")
 
 # MARKDOWN ********************
 
-# ### Tip: What Just Happened? (3B: Skewed Join)
-#
+# ### 💡 What Just Happened? (3B: Skewed Join)
+# 
 # We applied **key salting** to distribute skewed customer aggregations evenly across executors. The fix added a salt column for partial aggregation, then combined results.
-#
+# 
 # **Before the fix:**
-# - Top 5 customers heavily duplicated (9x duplication = 81x skew ratio)
-# - Single executor processed all rows for hot customers -> straggler tasks
+# - Top 5 customers heavily duplicated (9× duplication = 81× skew ratio)
+# - Single executor processed all rows for hot customers → straggler tasks
 # - Query took {q3b_problem_seconds:.1f} seconds
-#
+# 
 # **After the fix:**
 # - Added salt column: `F.pmod(F.xxhash64("order_id"), F.lit(16))` (16 buckets)
 # - Partial aggregation: `groupBy("customer_id", "salt")` distributed hot keys
 # - Final aggregation: `groupBy("customer_id")` combined partial results
 # - Query took {q3b_fix_seconds:.1f} seconds
-#
-# **Speedup:** {(q3b_problem_seconds / q3b_fix_seconds):.1f}x faster
-#
+# 
+# **Speedup:** {(q3b_problem_seconds / q3b_fix_seconds):.1f}× faster
+# 
 # ---
-#
-# **Plan: Skew Analysis:**
+# 
+# **📊 Skew Analysis:**
 # - Max partition rows: {INVESTIGATIONS["3B"]["maxCustomerRows"]:,}
 # - Median partition rows: {INVESTIGATIONS["3B"]["medianCustomerRows"]:,}
-# - **Skew ratio:** {INVESTIGATIONS["3B"]["skewRatio"]:.1f}x (ratio > 3 indicates severe skew)
-#
+# - **Skew ratio:** {INVESTIGATIONS["3B"]["skewRatio"]:.1f}× (ratio > 3 indicates severe skew)
+# 
 # ---
-#
+# 
 # **Salting Pattern:**
 # ```python
 # # 1. Add salt column to distribute hot keys
 # salted = df.withColumn("salt", F.pmod(F.xxhash64("order_id"), F.lit(16)))
-#
+# 
 # # 2. Partial aggregation with salt (distributes work across 16 tasks per customer)
 # partial = salted.groupBy("customer_id", "salt").agg(
 #     F.count("*").alias("orders"),
 #     F.sum("order_total").alias("revenue")
 # )
-#
+# 
 # # 3. Final aggregation removes salt (combines partial results)
 # final = partial.groupBy("customer_id").agg(
 #     F.sum("orders").alias("orders"),
 #     F.sum("revenue").alias("revenue")
 # )
 # ```
-#
+# 
 # ---
-#
-# > Note: **Key Takeaway:** When aggregating on skewed keys (e.g., hot customers, popular products), add a salt column to split each key into multiple partitions. Choose salt cardinality (16-32) based on skew severity. Always verify results match exactly.
+# 
+# > 📝 **Key Takeaway:** When aggregating on skewed keys (e.g., hot customers, popular products), add a salt column to split each key into multiple partitions. Choose salt cardinality (16-32) based on skew severity. Always verify results match exactly.
+
 
 # MARKDOWN ********************
 
 # ## 3C Context - Technic-Heavy LEGO Sets
-#
+# 
 # In this scenario, the LEGO planning team wants to identify **sets that are Technic-heavy** so they can prioritize them for marketing, packaging, and inventory decisions.
-#
+# 
 # We already have a denormalized dataset `q3c_sets_with_parts` where each LEGO set has an **array of part structs** (part number, color, quantity). The goal is to **find all sets that contain at least 10 distinct Technic parts**.
-#
+# 
 # Business rules:
 # - A **Technic part** is any part whose **category name contains `"Technic"`**.
 # - A set is considered **Technic-heavy** if it has **at least 10 distinct Technic part numbers**.
-#
+# 
 # The anti-pattern explodes the parts array for every set and only then joins to part/category tables to find Technic parts. The fix joins and filters first, then explodes only the relevant Technic parts.
 
 # CELL ********************
 
 # ============================================================
-# 3C SETUP - Materialize set inventory with array of parts
+# 3️⃣C SETUP — Materialize set inventory with array of parts
 # ============================================================
 remember_conf("spark.sql.autoBroadcastJoinThreshold")
 spark.conf.set("spark.sql.autoBroadcastJoinThreshold", "-1")
@@ -764,10 +776,10 @@ q3c_sets_with_parts.write.mode("overwrite").saveAsTable(table_ref("q3c_sets_with
 # CELL ********************
 
 # ============================================================
-# 3C PROBLEM - Explode array, then join to find Technic parts
+# 3️⃣C PROBLEM — Explode array, then join to find Technic parts
 # ============================================================
 
-print("[baseline] Running query with explode-first pattern (many intermediate rows)...\n")
+print("🐌 Running query with explode-first pattern (many intermediate rows)...\n")
 
 # Always read from the materialized table
 q3c_sets_with_parts_df = spark.table(table_ref("q3c_sets_with_parts"))
@@ -823,7 +835,7 @@ display(q3c_problem_rows)
 # CELL ********************
 
 # =================================================================================================
-# 3C INVESTIGATE - Quantify explosion overhead for Technic detection
+# 3️⃣C INVESTIGATE — Quantify explosion overhead for Technic detection
 # =================================================================================================
 
 
@@ -866,7 +878,7 @@ details = {
     "explosionRatio": f"{explosion_ratio:.1f}x",
     "impact": (
         f"Exploded {exploded_rows:,} parts from all sets, "
-        f"but only {filtered_rows:,} belong to Technic categories - "
+        f"but only {filtered_rows:,} belong to Technic categories — "
         f"{waste_percentage:.1f}% wasted"
     ),
 }
@@ -883,10 +895,10 @@ print(json.dumps(details, indent=2))
 # CELL ********************
 
 # ==================================================================================================
-# 3C FIX - Filter Technic categories and aggregate via array functions (no explode)
+# 3️⃣C FIX — Filter Technic categories and aggregate via array functions (no explode)
 # ==================================================================================================
 
-print("[fixed] Running query with category-filtered array and array aggregations (no explode)...\n")
+print("✅ Running query with category-filtered array and array aggregations (no explode)...\n")
 
 # Read from materialized table
 q3c_sets_with_parts_df = spark.table(table_ref("q3c_sets_with_parts"))
@@ -964,7 +976,7 @@ restore_conf("spark.sql.autoBroadcastJoinThreshold")
 # CELL ********************
 
 # ============================================================
-# 3C CHECK-CHANGES - Verify correctness and compare
+# 3️⃣C CHECK-CHANGES — Verify correctness and compare
 # ============================================================
 
 # Extract physical plans
@@ -989,32 +1001,32 @@ print(f"Fix plan has filter: {'filter' in q3c_fix_plan.lower()}")
 
 # MARKDOWN ********************
 
-# ### Tip: What Just Happened? (3C: Technic-Heavy Sets Without Unnecessary Explode)
-#
+# ### 💡 What Just Happened? (3C: Technic-Heavy Sets Without Unnecessary Explode)
+# 
 # We refactored the scenario to answer a concrete business question:
-#
+# 
 # > **Business use case:** _"Find all LEGO sets that are **Technic-heavy**, i.e., sets that contain at least **10 distinct Technic parts** (parts whose category name contains `Technic`)."_
-#
+# 
 # We still use `q3c_sets_with_parts`, where each set has an array of parts, but we changed **how** we detect Technic-heavy sets.
-#
+# 
 # **Before the fix (anti-pattern):**
-# - Exploded `parts_array` for **all sets and all parts** -> created {INVESTIGATIONS["3C"]["rowsAfterExplode"]:,} intermediate rows.
+# - Exploded `parts_array` for **all sets and all parts** → created {INVESTIGATIONS["3C"]["rowsAfterExplode"]:,} intermediate rows.
 # - Joined every exploded row to part/category tables to find Technic parts.
 # - Only {INVESTIGATIONS["3C"]["rowsAfterFilter"]:,} rows actually belonged to Technic categories.
 # - **Wasted processing:** {INVESTIGATIONS["3C"]["wastePercentage"]} of exploded rows were discarded.
-#
+# 
 # **After the fix (optimized):**
 # - Precomputed the list of **Technic part numbers** from `parts` and `part_categories` where the category name contains `"Technic"`.
 # - Used `array_filter()` on `parts_array` to keep only elements whose `part_num` is in the Technic list.
 # - Exploded only the filtered `technic_parts` array.
 # - Aggregated per set and kept only sets with **>= 10 distinct Technic parts**.
-#
+# 
 # ---
-#
+# 
 # **Pattern comparison:**
-#
+# 
 # ```python
-# # [anti-pattern] Anti-pattern: Explode, then join, then filter Technic parts
+# # ❌ Anti-pattern: Explode, then join, then filter Technic parts
 # technic_sets_problem = (
 #     q3c_sets_with_parts
 #       .select("set_num", "set_name", explode("parts_array").alias("part_struct"))
@@ -1029,8 +1041,8 @@ print(f"Fix plan has filter: {'filter' in q3c_fix_plan.lower()}")
 #       )
 #       .filter(col("technic_unique_parts") >= 10)
 # )
-#
-# # [fixed] Optimized: Filter array using Technic part list, then explode
+# 
+# # ✅ Optimized: Filter array using Technic part list, then explode
 # technic_part_nums_lit = array(*[lit(p) for p in q3c_technic_part_nums])
 # technic_sets_fix = (
 #     q3c_sets_with_parts
@@ -1051,59 +1063,61 @@ print(f"Fix plan has filter: {'filter' in q3c_fix_plan.lower()}")
 #       .filter(col("technic_unique_parts") >= 10)
 # )
 # ```
-#
+# 
 # ---
-#
+# 
 # **Execution flow comparison:**
-#
-# - **Problem:** _explode all parts -> join to Technic dimension -> filter Technic parts -> aggregate._
-# - **Fix:** _precompute Technic part list -> filter arrays in-place -> explode only Technic parts -> aggregate._
-#
+# 
+# - **Problem:** _explode all parts → join to Technic dimension → filter Technic parts → aggregate._
+# - **Fix:** _precompute Technic part list → filter arrays in-place → explode only Technic parts → aggregate._
+# 
 # This drastically reduces the number of rows that need to be exploded and joined, while answering the same business question.
-#
-# > Note: **Key Takeaway:** When you need to find sets/items that satisfy a condition based on a **subset of array elements** (e.g., Technic parts), avoid exploding everything. Instead, derive the qualifying keys (Technic part numbers), use `array_filter()` to keep only matching elements, and **then** explode and aggregate.
+# 
+# > 📝 **Key Takeaway:** When you need to find sets/items that satisfy a condition based on a **subset of array elements** (e.g., Technic parts), avoid exploding everything. Instead, derive the qualifying keys (Technic part numbers), use `array_filter()` to keep only matching elements, and **then** explode and aggregate.
+
 
 # MARKDOWN ********************
 
 # ## 3D Context - The Shuffle Storm
-#
+# 
 # In this scenario, the LEGO planning and design teams want to understand **color diversity and piece counts per set**.
-#
+# 
 # They use several tables:
-#
-# - `inventory_parts` - each row is a specific part/color/quantity in an inventory
-# - `inventories` - maps inventories to LEGO set numbers
-# - `sets` - provides set name and theme ID
-# - `themes` - provides the theme name (e.g., City, Technic, Star Wars)
-#
+# 
+# - `inventory_parts` — each row is a specific part/color/quantity in an inventory
+# - `inventories` — maps inventories to LEGO set numbers
+# - `sets` — provides set name and theme ID
+# - `themes` — provides the theme name (e.g., City, Technic, Star Wars)
+# 
 # The business questions include:
-#
+# 
 # - _"Which sets use the **widest variety of colors**?"_
 # - _"Which sets have the **largest total number of pieces**?"_
 # - _"How does this vary by theme for marketing and supply chain decisions?"_
-#
+# 
 # Answering this requires computing **distinct colors** and **total pieces per set**, then ranking sets by these metrics.
-#
+# 
 # ### Anti-Pattern: Join-Then-Aggregate on a Large Fact Table
-#
+# 
 # The baseline query takes the most straightforward approach:
-#
+# 
 # 1. Start from the large `inventory_parts` table
 # 2. Join to `inventories`, then `sets`, then `themes`
 # 3. Only after all joins, perform a `groupBy` to compute `countDistinct(color_id)` and `sum(quantity)`
-#
+# 
 # This creates a **shuffle storm**:
-#
+# 
 # - The big `inventory_parts` fact table is fully joined and shuffled before any reduction
 # - `countDistinct` and `sum` run over a large, fully-joined dataset
 # - The physical plan shows heavy `Exchange` operators with many shuffle partitions
-#
+# 
 # This is an anti-pattern for aggregation-heavy workloads: **large joins happen before obvious pre-aggregation opportunities**, causing unnecessary shuffles of millions of rows. The remainder of the lab demonstrates how to **pre-aggregate and de-duplicate** (colors and piece counts) before joining, significantly reducing shuffle volume and runtime.
+
 
 # CELL ********************
 
 # ============================================================
-# 3D SETUP - Prepare LEGO inventory DataFrames
+# 3️⃣D SETUP — Prepare LEGO inventory DataFrames
 # ============================================================
 
 print("=== Table Metrics ===")
@@ -1127,10 +1141,10 @@ q3d_themes=spark.table(table_ref("themes")).select(F.col("id").alias("theme_id")
 # CELL ********************
 
 # ============================================================
-# 3D PROBLEM - Join large table before aggregation
+# 3️⃣D PROBLEM — Join large table before aggregation
 # ============================================================
 
-print("[baseline] Running with join-then-aggregate (large shuffle)...\n")
+print("🐌 Running with join-then-aggregate (large shuffle)...\n")
 
 with benchmark_op("Shuffle Storm", "before", spark):
     q3d_problem_df=(
@@ -1157,7 +1171,7 @@ display(q3d_problem_rows)
 # CELL ********************
 
 # =================================================================================================
-# 3D INVESTIGATE - Confirm large shuffle with high partition count
+# 3️⃣D INVESTIGATE — Confirm large shuffle with high partition count
 # =================================================================================================
 
 
@@ -1175,10 +1189,10 @@ print(q3d_problem_plan); record("3D","investigation","complete",INVESTIGATIONS["
 # CELL ********************
 
 # ==================================================================================================
-# 3D FIX - Pre-aggregate before joins, reduce shuffle partitions
+# 3️⃣D FIX — Pre-aggregate before joins, reduce shuffle partitions
 # ==================================================================================================
 
-print("[fixed] Running with pre-aggregation (reduced shuffle)...\n")
+print("✅ Running with pre-aggregation (reduced shuffle)...\n")
 
 with benchmark_op("Shuffle Storm", "after", spark):# Restore config
 
@@ -1229,7 +1243,7 @@ display(q3d_fix_rows)
 # CELL ********************
 
 # ============================================================
-# 3D CHECK-CHANGES - Verify shuffle reduction
+# 3️⃣D CHECK-CHANGES — Verify shuffle reduction
 # ============================================================
 
 q3d_fix_plan = explain_to_string(q3d_fix_df)
@@ -1245,36 +1259,36 @@ fix_has_exchange
 
 # MARKDOWN ********************
 
-# ### Tip: What Just Happened? (3D: Pre-Aggregation to Reduce Shuffle)
-#
+# ### 💡 What Just Happened? (3D: Pre-Aggregation to Reduce Shuffle)
+# 
 # We pre-aggregated and de-duplicated the large `inventory_parts` table **before** joining to downstream tables. This dramatically reduced shuffle data volume.
-#
+# 
 # **Before the fix:**
 # - Joined full `inventory_parts` ({INVESTIGATIONS["3D"]["inventoryPartRows"]:,} rows) to `inventories`, `sets`, `themes`
-# - Applied `countDistinct("color_id")` after all joins -> shuffle entire joined dataset
+# - Applied `countDistinct("color_id")` after all joins → shuffle entire joined dataset
 # - Shuffle partitions: {INVESTIGATIONS["3D"]["shufflePartitions"]} (default, too high for small result)
 # - Query took {q3d_problem_seconds:.1f} seconds
-#
+# 
 # **After the fix:**
 # - **Pre-aggregated colors:** `select("inventory_id", "color_id").distinct()` reduced to unique pairs
 # - **Pre-aggregated pieces:** `groupBy("inventory_id").agg(F.sum("quantity"))` 
 # - Joined smaller aggregated DataFrames to dimensions
 # - Reduced shuffle partitions to 32 (appropriate for result size)
 # - Query took {q3d_fix_seconds:.1f} seconds
-#
-# **Speedup:** {(q3d_problem_seconds / q3d_fix_seconds):.1f}x faster
-#
+# 
+# **Speedup:** {(q3d_problem_seconds / q3d_fix_seconds):.1f}× faster
+# 
 # ---
-#
+# 
 # **Optimization Strategy:**
-#
+# 
 # 1. **Push-down aggregation:** Reduce data volume early in the pipeline
 # 2. **Separate aggregations:** Split `countDistinct` and `sum` into separate branches
 # 3. **Join smaller DataFrames:** Reduced shuffle from GBs to MBs
 # 4. **Tune shuffle partitions:** Match partition count to data volume
-#
+# 
 # ---
-#
+# 
 # **Pre-Aggregation Pattern:**
 # ```python
 # # Instead of:
@@ -1282,39 +1296,41 @@ fix_has_exchange
 #     F.countDistinct("col_a"),
 #     F.sum("col_b")
 # )
-#
+# 
 # # Do this:
 # # 1. Pre-aggregate each metric separately
 # distinct_a = large_table.select("key", "col_a").distinct()
 # sum_b = large_table.groupBy("key").agg(F.sum("col_b"))
-#
+# 
 # # 2. Join small aggregates to dimensions
 # agg1 = distinct_a.join(dim1).join(dim2).groupBy(...).agg(F.countDistinct("col_a"))
 # agg2 = sum_b.join(dim1).groupBy(...).agg(F.sum("col_b"))
-#
+# 
 # # 3. Combine results
 # result = agg1.join(agg2, "key")
 # ```
-#
+# 
 # ---
-#
-# > Note: **Key Takeaway:** When joining large tables followed by aggregation, pre-aggregate or de-duplicate **before** joining to minimize shuffle data. Separate independent aggregations into parallel branches, then combine results.
+# 
+# > 📝 **Key Takeaway:** When joining large tables followed by aggregation, pre-aggregate or de-duplicate **before** joining to minimize shuffle data. Separate independent aggregations into parallel branches, then combine results.
+
 
 # MARKDOWN ********************
 
 # ## 3E Context - The Streaming Pipeline
-#
+# 
 # The baseline creates a stateful streaming aggregation without watermarking. The fix adds a two-hour event-time watermark and validates the streaming plan.
 
 # CELL ********************
 
 # ============================================================
-# 3E SETUP - Prepare batch data for streaming
+# 3️⃣E SETUP — Prepare batch data for streaming
 # ============================================================
 
 print("=== Table Metrics ===")
 
 print(f"manufacturing_event: {TABLE_METRICS['manufacturing_event']['numFiles']:,} files\n {TABLE_METRICS['manufacturing_event']['rows']:,} rows\n")
+
 
 # METADATA ********************
 
@@ -1326,11 +1342,11 @@ print(f"manufacturing_event: {TABLE_METRICS['manufacturing_event']['numFiles']:,
 # CELL ********************
 
 # ============================================================
-# 3E PROBLEM - Streaming aggregation without watermark
+# 3️⃣E PROBLEM — Streaming aggregation without watermark
 # ============================================================
 
 
-print("[baseline] Creating streaming query WITHOUT watermark (unbounded state growth)...\n")
+print("🐌 Creating streaming query WITHOUT watermark (unbounded state growth)...\n")
 
 # Read stream
 stream = (
@@ -1372,7 +1388,7 @@ streaming_query.awaitTermination()
 # CELL ********************
 
 # =================================================================================================
-# 3E INVESTIGATE - Confirm missing watermark in stateful aggregation
+# 3️⃣E INVESTIGATE — Confirm missing watermark in stateful aggregation
 # =================================================================================================
 last_progress = streaming_query.lastProgress
 # Check memoryUsedBytes and numRowsDroppedByWatermark in the stateOperators = last_progress["stateOperators"][0]
@@ -1392,10 +1408,10 @@ print(f"Number of rows dropped by watermark: {num_rows_dropped_by_watermark}")
 # CELL ********************
 
 # ==================================================================================================
-# 3E FIX - Add event-time watermark for state cleanup
+# 3️⃣E FIX — Add event-time watermark for state cleanup
 # ==================================================================================================
 
-print("[fixed] Creating streaming query WITH 2-hour watermark (bounded state)...\n")
+print("✅ Creating streaming query WITH 2-hour watermark (bounded state)...\n")
 
 # Read stream
 stream = (
@@ -1439,7 +1455,7 @@ streaming_query.awaitTermination()
 # CELL ********************
 
 # ============================================================
-# 3E CHECK-CHANGES - Verify watermark in plan
+# 3️⃣E CHECK-CHANGES — Verify watermark in plan
 # ============================================================
 
 last_progress = streaming_query.lastProgress
@@ -1459,50 +1475,50 @@ print(f"Number of rows dropped by watermark: {num_rows_dropped_by_watermark}")
 
 # MARKDOWN ********************
 
-# ### Tip: What Just Happened? (3E: Streaming Watermark)
-#
+# ### 💡 What Just Happened? (3E: Streaming Watermark)
+# 
 # We added an **event-time watermark** to the streaming query to enable Spark to drop old state for time-windowed aggregations. Without watermark, state grows unbounded.
-#
+# 
 # **Before the fix:**
 # - Stateful streaming aggregation with `window("event_ts", "1 hour")`
-# - **No watermark** -> Spark retains all window state forever
-# - Risk: state grows indefinitely -> OOM in long-running streams
+# - **No watermark** → Spark retains all window state forever
+# - Risk: state grows indefinitely → OOM in long-running streams
 # - Problem plan has NO `EventTimeWatermark` operator
-#
+# 
 # **After the fix:**
 # - Added `.withWatermark("event_ts", "2 hours")` before windowing
 # - Spark can drop state for windows older than: `max_event_time - 2 hours`
 # - Fixed plan has `EventTimeWatermark` operator
 # - Enables late-data tolerance while bounding state size
-#
+# 
 # ---
-#
+# 
 # **Watermark Mechanics:**
-#
+# 
 # ```python
 # # Without watermark (unbounded state growth)
 # stream.groupBy(F.window("event_ts", "1 hour"), "key").agg(...)
-#
+# 
 # # With watermark (bounded state)
 # stream \
 #     .withWatermark("event_ts", "2 hours") \  # Drop state older than this
 #     .groupBy(F.window("event_ts", "1 hour"), "key") \
 #     .agg(...)
 # ```
-#
+# 
 # **Watermark Trade-off:**
 # - **Smaller watermark** (e.g., 10 minutes): Faster state cleanup, but drops late data
 # - **Larger watermark** (e.g., 24 hours): Handles very late data, but higher memory usage
-# - **Rule of thumb:** Set watermark to 2-3x expected max late-arrival time
-#
+# - **Rule of thumb:** Set watermark to 2-3× expected max late-arrival time
+# 
 # ---
-#
+# 
 # **Streaming Patterns Requiring Watermark:**
 # 1. Time-windowed aggregations (tumbling, sliding, session windows)
 # 2. Stream-stream joins with time bounds
 # 3. Deduplication with time constraints
 # 4. Any stateful operation where old state should be pruned
-#
+# 
 # ---
-#
-# > Note: **Key Takeaway:** Always add `.withWatermark()` for time-windowed streaming aggregations. Choose watermark duration based on expected late-data arrival tolerance vs. memory constraints. Verify `EventTimeWatermark` appears in the streaming plan.
+# 
+# > 📝 **Key Takeaway:** Always add `.withWatermark()` for time-windowed streaming aggregations. Choose watermark duration based on expected late-data arrival tolerance vs. memory constraints. Verify `EventTimeWatermark` appears in the streaming plan.
