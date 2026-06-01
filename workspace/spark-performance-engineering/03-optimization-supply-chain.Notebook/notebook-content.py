@@ -626,53 +626,74 @@ restore_conf("spark.sql.adaptive.advisoryPartitionSizeInBytes")
 
 # MARKDOWN ********************
 
-# ### 💡 What Just Happened? (3B: Skewed Join)
+# ### 💡 What Just Happened? (3B: Skewed Join on Hot Customers)
 # 
-# We applied **key salting** to distribute skewed customer aggregations evenly across executors. The fix added a salt column for partial aggregation, then combined results.
+# We diagnosed and optimized a **skewed join** between `web_order_skewed` and `customer` on `customer_id`. The skew comes from a handful of **very hot customers** whose orders were duplicated many times, concentrating work on a small number of partitions.
 # 
-# **Before the fix:**
-# - Top 5 customers heavily duplicated (9× duplication = 81× skew ratio)
-# - Single executor processed all rows for hot customers → straggler tasks
-# - Query took {q3b_problem_seconds:.1f} seconds
+# **Baseline pattern (problem):**
+# - Join: `web_order_skewed` → `customer` on `customer_id`
+# - Then aggregate: `groupBy("customer.name")` with `count(*)` and `sum(order_total)`
+# - A few hot customers own a huge fraction of the rows → a small number of partitions become very large
+# - Result: **straggler tasks**, poor parallelism, risk of executor OOM
 # 
-# **After the fix:**
-# - Added salt column: `F.pmod(F.xxhash64("order_id"), F.lit(16))` (16 buckets)
-# - Partial aggregation: `groupBy("customer_id", "salt")` distributed hot keys
-# - Final aggregation: `groupBy("customer_id")` combined partial results
-# - Query took {q3b_fix_seconds:.1f} seconds
+# In 3B we applied **three different optimization strategies** for the *same logical query*:
 # 
-# **Speedup:** {(q3b_problem_seconds / q3b_fix_seconds):.1f}× faster
-# 
-# ---
-# 
-# **📊 Skew Analysis:**
-# - Max partition rows: {INVESTIGATIONS["3B"]["maxCustomerRows"]:,}
-# - Median partition rows: {INVESTIGATIONS["3B"]["medianCustomerRows"]:,}
-# - **Skew ratio:** {INVESTIGATIONS["3B"]["skewRatio"]:.1f}× (ratio > 3 indicates severe skew)
+# 1. **Manual salting** (redistribute skewed keys)
+# 2. **Join skew hint** (let the optimizer know which key is skewed)
+# 3. **Adaptive Query Execution (AQE) skew handling** (let Spark detect and fix skew at runtime)
 # 
 # ---
 # 
-# **Salting Pattern:**
+# #### 1️⃣ Manual Salting
+# 
+# We explicitly spread the work for each `customer_id` over multiple buckets using a derived `salted_customer_id` key:
+# 
+# - Created a small `salt` DataFrame: `range(0, skewFactor)`
+# - Cross-joined it with `web_order_skewed` and built `salted_customer_id = concat(customer_id, "_", salt)`
+# - Built a matching `salted_customer_id` on the `customer` side
+# - Joined on `salted_customer_id` and then aggregated by `customer.name`
+# 
+# Effect: each hot customer’s rows are split into multiple salted keys, distributing work across many tasks and reducing stragglers.
+# 
+# ---
+# 
+# #### 2️⃣ Join Skew Hint
+# 
+# Next, we kept the query structure simple but gave Spark an explicit hint about the skewed column:
+# 
 # ```python
-# # 1. Add salt column to distribute hot keys
-# salted = df.withColumn("salt", F.pmod(F.xxhash64("order_id"), F.lit(16)))
-# 
-# # 2. Partial aggregation with salt (distributes work across 16 tasks per customer)
-# partial = salted.groupBy("customer_id", "salt").agg(
-#     F.count("*").alias("orders"),
-#     F.sum("order_total").alias("revenue")
-# )
-# 
-# # 3. Final aggregation removes salt (combines partial results)
-# final = partial.groupBy("customer_id").agg(
-#     F.sum("orders").alias("orders"),
-#     F.sum("revenue").alias("revenue")
-# )
+# spark.table(table_ref("web_order_skewed")) \
+#     .hint("skew", "customer_id") \
+#     .join(spark.table(table_ref("customer")), "customer_id") \
+#     .groupBy("customer.name") \
+#     .agg(F.count("*").alias("orders"), F.sum("order_total").alias("revenue"))
 # ```
 # 
+# This tells the optimizer that `customer_id` is skewed so it can apply internal strategies (e.g., salting/splitting heavy keys) without us rewriting the data flow.
+# 
 # ---
 # 
-# > 📝 **Key Takeaway:** When aggregating on skewed keys (e.g., hot customers, popular products), add a salt column to split each key into multiple partitions. Choose salt cardinality (16-32) based on skew severity. Always verify results match exactly.
+# #### 3️⃣ AQE Skew Join Optimization
+# 
+# Finally, we turned on **Adaptive Query Execution (AQE)** skew handling:
+# 
+# ```python
+# spark.conf.set("spark.sql.adaptive.enabled", "true")
+# spark.conf.set("spark.sql.adaptive.skewedJoin.enabled", "true")
+# spark.conf.set("spark.sql.adaptive.coalescePartitions.enabled", "true")
+# spark.conf.set("spark.sql.adaptive.advisoryPartitionSizeInBytes", "128MB")
+# ```
+# 
+# With these settings enabled, Spark monitors partition sizes at runtime and automatically:
+# - Detects skewed partitions for the `customer_id` join
+# - Splits large partitions into smaller ones
+# - Coalesces tiny partitions to reduce overhead
+# 
+# This improves robustness without changing the query itself.
+# 
+# ---
+# 
+# > 📝 **Key Takeaway:** When a **join** is skewed on a hot key (like `customer_id`), you can fix it by (1) explicitly **salting** the key, (2) using a **skew join hint**, or (3) enabling **AQE skew handling**. All three keep the business logic the same—join `web_order_skewed` to `customer` and aggregate by customer—but they drastically improve parallelism and reduce stragglers.
 
 
 # MARKDOWN ********************
@@ -1003,77 +1024,110 @@ print(f"Fix plan has filter: {'filter' in q3c_fix_plan.lower()}")
 
 # ### 💡 What Just Happened? (3C: Technic-Heavy Sets Without Unnecessary Explode)
 # 
-# We refactored the scenario to answer a concrete business question:
+# We optimized how we identify **Technic-heavy LEGO sets** using array operations instead of exploding everything and joining huge intermediate datasets.
 # 
 # > **Business use case:** _"Find all LEGO sets that are **Technic-heavy**, i.e., sets that contain at least **10 distinct Technic parts** (parts whose category name contains `Technic`)."_
 # 
-# We still use `q3c_sets_with_parts`, where each set has an array of parts, but we changed **how** we detect Technic-heavy sets.
-# 
-# **Before the fix (anti-pattern):**
-# - Exploded `parts_array` for **all sets and all parts** → created {INVESTIGATIONS["3C"]["rowsAfterExplode"]:,} intermediate rows.
-# - Joined every exploded row to part/category tables to find Technic parts.
-# - Only {INVESTIGATIONS["3C"]["rowsAfterFilter"]:,} rows actually belonged to Technic categories.
-# - **Wasted processing:** {INVESTIGATIONS["3C"]["wastePercentage"]} of exploded rows were discarded.
-# 
-# **After the fix (optimized):**
-# - Precomputed the list of **Technic part numbers** from `parts` and `part_categories` where the category name contains `"Technic"`.
-# - Used `array_filter()` on `parts_array` to keep only elements whose `part_num` is in the Technic list.
-# - Exploded only the filtered `technic_parts` array.
-# - Aggregated per set and kept only sets with **>= 10 distinct Technic parts**.
+# We start from `q3c_sets_with_parts`, where each row is a set and `parts_array` is an array of structs `(part_num, part_cat_id, quantity)`.
 # 
 # ---
 # 
-# **Pattern comparison:**
+# #### Baseline pattern (problem): explode → join → filter
 # 
-# ```python
-# # ❌ Anti-pattern: Explode, then join, then filter Technic parts
-# technic_sets_problem = (
-#     q3c_sets_with_parts
-#       .select("set_num", "set_name", explode("parts_array").alias("part_struct"))
-#       .select("set_num", "set_name",
-#               col("part_struct.part_num").alias("part_num"),
-#               col("part_struct.quantity").alias("quantity"))
-#       .join(q3c_technic_parts, "part_num")
-#       .groupBy("set_num", "set_name")
-#       .agg(
-#           countDistinct("part_num").alias("technic_unique_parts"),
-#           sum("quantity").alias("technic_quantity"),
-#       )
-#       .filter(col("technic_unique_parts") >= 10)
-# )
+# The baseline query follows an **explode-first** pattern:
 # 
-# # ✅ Optimized: Filter array using Technic part list, then explode
-# technic_part_nums_lit = array(*[lit(p) for p in q3c_technic_part_nums])
-# technic_sets_fix = (
-#     q3c_sets_with_parts
-#       .withColumn(
-#           "technic_parts",
-#           array_filter(
-#               col("parts_array"),
-#               lambda part: array_contains(technic_part_nums_lit, part.part_num)
-#           ),
-#       )
-#       .filter(size("technic_parts") > 0)
-#       .select("set_num", "set_name", explode("technic_parts").alias("part_struct"))
-#       .groupBy("set_num", "set_name")
-#       .agg(
-#           countDistinct("part_struct.part_num").alias("technic_unique_parts"),
-#           sum("part_struct.quantity").alias("technic_quantity"),
-#       )
-#       .filter(col("technic_unique_parts") >= 10)
-# )
-# ```
+# 1. **Explode** `parts_array` for every set into individual rows
+# 2. **Join** all exploded rows to `part_categories` on `part_cat_id`
+# 3. **Filter** down to Technic parts using `category_name LIKE '%technic%'`
+# 4. **Group** by set to compute:
+#    - `countDistinct(part_num)` as `technic_unique_parts`
+#    - `sum(quantity)` as `technic_quantity`
+# 
+# Because most parts are **not** Technic, this pattern explodes a very large number of rows only to discard most of them after the join/filter. That creates a lot of shuffle and CPU overhead for little signal.
 # 
 # ---
 # 
-# **Execution flow comparison:**
+# #### Optimized pattern (fix): filter arrays in-place, no explode
 # 
-# - **Problem:** _explode all parts → join to Technic dimension → filter Technic parts → aggregate._
-# - **Fix:** _precompute Technic part list → filter arrays in-place → explode only Technic parts → aggregate._
+# In the optimized version, we keep the same business logic but change *where* the work happens:
 # 
-# This drastically reduces the number of rows that need to be exploded and joined, while answering the same business question.
+# 1. Identify **Technic categories** once from `part_categories` and collect their IDs:
 # 
-# > 📝 **Key Takeaway:** When you need to find sets/items that satisfy a condition based on a **subset of array elements** (e.g., Technic parts), avoid exploding everything. Instead, derive the qualifying keys (Technic part numbers), use `array_filter()` to keep only matching elements, and **then** explode and aggregate.
+#    ```python
+#    technic_categories = (
+#        spark.table(table_ref("part_categories"))
+#        .select(F.col("id").alias("part_cat_id"), F.col("name").alias("category_name"))
+#        .filter(F.lower(F.col("category_name")).contains("technic"))
+#        .select("part_cat_id").distinct()
+#    )
+#    q3c_technic_part_cat_ids = [r["part_cat_id"] for r in technic_categories.collect()]
+#    technic_cat_ids_lit = F.array(*[F.lit(c) for c in q3c_technic_part_cat_ids])
+#    ```
+# 
+# 2. **Filter the array directly** using `array_filter` and `array_contains`:
+# 
+#    ```python
+#    q3c_sets_with_parts_df = spark.table(table_ref("q3c_sets_with_parts"))
+# 
+#    df_with_technic = (
+#        q3c_sets_with_parts_df
+#        .withColumn(
+#            "technic_parts",
+#            F.filter(
+#                F.col("parts_array"),
+#                lambda part: F.array_contains(technic_cat_ids_lit, part.part_cat_id),
+#            ),
+#        )
+#        .filter(F.size("technic_parts") > 0)
+#    )
+#    ```
+# 
+#    Now each row still corresponds to a single set, but `technic_parts` only contains elements whose `part_cat_id` is Technic.
+# 
+# 3. **Aggregate directly over the filtered array** (no explode):
+# 
+#    ```python
+#    q3c_fix_df = (
+#        df_with_technic
+#        .withColumn(
+#            "technic_unique_parts",
+#            F.size(
+#                F.array_distinct(
+#                    F.transform("technic_parts", lambda p: p.part_num)
+#                )
+#            ),
+#        )
+#        .withColumn(
+#            "technic_quantity",
+#            F.aggregate(
+#                "technic_parts",
+#                F.lit(0).cast("long"),
+#                lambda acc, p: acc + p.quantity.cast("long"),
+#            ),
+#        )
+#        .filter(F.col("technic_unique_parts") >= 10)
+#        .select("set_num", "set_name", "technic_unique_parts", "technic_quantity")
+#        .orderBy(F.desc("technic_unique_parts"), F.desc("technic_quantity"), "set_num")
+#    )
+#    ```
+# 
+#    This keeps the computation **set-local** and avoids materializing a giant exploded join result.
+# 
+# ---
+# 
+# #### Execution flow comparison
+# 
+# - **Problem:**
+#   - _explode all parts → join to `part_categories` → filter Technic → group and aggregate_
+#   - Heavy row explosion and shuffle; most work is discarded after the fact.
+# 
+# - **Fix:**
+#   - _derive Technic category IDs → filter arrays in-place → aggregate directly over filtered array_
+#   - No global explode; far fewer rows touched by the join and aggregation, with the same final answer.
+# 
+# ---
+# 
+# > 📝 **Key Takeaway:** When working with **arrays of structs**, avoid exploding everything just to filter a small subset. Instead, precompute the qualifying keys or category IDs, use `array_filter`, `transform`, and `aggregate` to operate **inside the array**, and only explode if you truly need row-level output. This dramatically reduces shuffle and intermediate row counts while preserving business semantics.
 
 
 # MARKDOWN ********************
@@ -1174,10 +1228,20 @@ display(q3d_problem_rows)
 # 3️⃣D INVESTIGATE — Confirm large shuffle with high partition count
 # =================================================================================================
 
+# Capture physical plan for the problematic query
+q3d_problem_plan = explain_to_string(q3d_problem_df)
 
-q3d_problem_plan=explain_to_string(q3d_problem_df)
-INVESTIGATIONS["3D"]={"inventoryPartRows":TABLE_METRICS["inventory_parts"]["rows"],"problemHasExchange":"Exchange" in q3d_problem_plan,"shufflePartitions":spark.conf.get("spark.sql.shuffle.partitions")}
-print(q3d_problem_plan); record("3D","investigation","complete",INVESTIGATIONS["3D"])
+# Summarize key investigation metrics
+details = {
+    "antiPattern": "Join-then-aggregate shuffle storm on inventory_parts",
+    "inventoryPartRows": TABLE_METRICS["inventory_parts"]["rows"],
+    "problemHasExchange": "Exchange" in q3d_problem_plan,
+    "shufflePartitions": int(spark.conf.get("spark.sql.shuffle.partitions")),
+}
+
+print(json.dumps(details, indent=2))
+print("\n=== Physical Plan (3D Problem Query) ===\n")
+q3d_problem_df.explain(mode="formatted")
 
 # METADATA ********************
 
@@ -1246,9 +1310,20 @@ display(q3d_fix_rows)
 # 3️⃣D CHECK-CHANGES — Verify shuffle reduction
 # ============================================================
 
+# Extract physical plan for the fixed query
 q3d_fix_plan = explain_to_string(q3d_fix_df)
+
+# Simple indicators of remaining shuffle
 fix_has_exchange = "Exchange" in q3d_fix_plan
-fix_has_exchange
+fix_has_aggregate = "Aggregate" in q3d_fix_plan
+
+print("=== 3D Shuffle Storm — Check Changes ===")
+print(f"Fixed plan contains Exchange (shuffle) operators: {fix_has_exchange}")
+print(f"Fixed plan contains Aggregate operators: {fix_has_aggregate}")
+print(f"Configured shuffle partitions: {spark.conf.get('spark.sql.shuffle.partitions')}")
+
+print("\n=== Physical Plan (3D Fixed Query) ===\n")
+q3d_fix_df.explain(mode="formatted")
 
 # METADATA ********************
 
@@ -1259,60 +1334,108 @@ fix_has_exchange
 
 # MARKDOWN ********************
 
-# ### 💡 What Just Happened? (3D: Pre-Aggregation to Reduce Shuffle)
+# ### 💡 What Just Happened? (3D: Pre-Aggregation to Tame the Shuffle Storm)
 # 
-# We pre-aggregated and de-duplicated the large `inventory_parts` table **before** joining to downstream tables. This dramatically reduced shuffle data volume.
+# We optimized a **join-then-aggregate** pattern on `inventory_parts` that was causing a shuffle storm by **pre-aggregating before the joins**.
 # 
-# **Before the fix:**
-# - Joined full `inventory_parts` ({INVESTIGATIONS["3D"]["inventoryPartRows"]:,} rows) to `inventories`, `sets`, `themes`
-# - Applied `countDistinct("color_id")` after all joins → shuffle entire joined dataset
-# - Shuffle partitions: {INVESTIGATIONS["3D"]["shufflePartitions"]} (default, too high for small result)
-# - Query took {q3d_problem_seconds:.1f} seconds
+# > **Business use case:** _"For each LEGO set, compute how many **distinct colors** it uses and the **total number of pieces**, then rank the top sets."_
 # 
-# **After the fix:**
-# - **Pre-aggregated colors:** `select("inventory_id", "color_id").distinct()` reduced to unique pairs
-# - **Pre-aggregated pieces:** `groupBy("inventory_id").agg(F.sum("quantity"))` 
-# - Joined smaller aggregated DataFrames to dimensions
-# - Reduced shuffle partitions to 32 (appropriate for result size)
-# - Query took {q3d_fix_seconds:.1f} seconds
-# 
-# **Speedup:** {(q3d_problem_seconds / q3d_fix_seconds):.1f}× faster
+# We start from the fact table `inventory_parts` and join through `inventories`, `sets`, and `themes` to get set and theme details.
 # 
 # ---
 # 
-# **Optimization Strategy:**
+# #### Baseline pattern (problem): join → then aggregate
 # 
-# 1. **Push-down aggregation:** Reduce data volume early in the pipeline
-# 2. **Separate aggregations:** Split `countDistinct` and `sum` into separate branches
-# 3. **Join smaller DataFrames:** Reduced shuffle from GBs to MBs
-# 4. **Tune shuffle partitions:** Match partition count to data volume
+# The baseline query takes the most direct but most expensive route:
 # 
-# ---
+# 1. Start from full `inventory_parts`
+# 2. Join to `inventories` → `sets` → `themes`
+# 3. Only after all joins, perform a `groupBy("set_num", "set_name", "theme_name")` with:
+#    - `countDistinct("color_id")` as `distinct_colors`
+#    - `sum("quantity")` as `total_pieces`
 # 
-# **Pre-Aggregation Pattern:**
-# ```python
-# # Instead of:
-# result = large_table.join(dim1).join(dim2).groupBy(...).agg(
-#     F.countDistinct("col_a"),
-#     F.sum("col_b")
-# )
+# Why this is a problem:
 # 
-# # Do this:
-# # 1. Pre-aggregate each metric separately
-# distinct_a = large_table.select("key", "col_a").distinct()
-# sum_b = large_table.groupBy("key").agg(F.sum("col_b"))
+# - The large `inventory_parts` table is **fully joined and shuffled** before any reduction
+# - `countDistinct` and `sum` operate over a **fully-expanded joined dataset**
+# - The physical plan shows heavy `Exchange` operators and many shuffle partitions
 # 
-# # 2. Join small aggregates to dimensions
-# agg1 = distinct_a.join(dim1).join(dim2).groupBy(...).agg(F.countDistinct("col_a"))
-# agg2 = sum_b.join(dim1).groupBy(...).agg(F.sum("col_b"))
-# 
-# # 3. Combine results
-# result = agg1.join(agg2, "key")
-# ```
+# Result: lots of data movement and CPU for work that could have been done earlier on smaller data.
 # 
 # ---
 # 
-# > 📝 **Key Takeaway:** When joining large tables followed by aggregation, pre-aggregate or de-duplicate **before** joining to minimize shuffle data. Separate independent aggregations into parallel branches, then combine results.
+# #### Optimized pattern (fix): pre-aggregate, then join
+# 
+# In the optimized version, we keep the same business logic but change the order of operations:
+# 
+# 1. **Pre-aggregate color diversity per inventory**:
+# 
+#    ```python
+#    distinct_colors = q3d_ip.select("inventory_id", "color_id").distinct()
+#    ```
+# 
+#    This de-duplicates `(inventory_id, color_id)` pairs so `countDistinct` later works on far fewer rows.
+# 
+# 2. **Pre-aggregate piece counts per inventory**:
+# 
+#    ```python
+#    pieces_sum = q3d_ip.groupBy("inventory_id").agg(F.sum("quantity").alias("inventory_pieces"))
+#    ```
+# 
+#    We summarize total pieces per inventory **before** any joins.
+# 
+# 3. **Join small aggregates to dimensions (two branches)**:
+# 
+#    - **Colors branch**: join `distinct_colors` → `inventories` → `sets` → `themes`, then group by set to get `distinct_colors`
+#    - **Pieces branch**: join `pieces_sum` → `inventories`, then group by set to get `total_pieces`
+# 
+#    ```python
+#    colors_agg = (
+#        distinct_colors
+#        .join(q3d_inv, "inventory_id")
+#        .join(q3d_sets, "set_num")
+#        .join(q3d_themes, "theme_id", "left")
+#        .groupBy("set_num", "set_name", "theme_name")
+#        .agg(F.countDistinct("color_id").alias("distinct_colors"))
+#    )
+# 
+#    pieces_agg = (
+#        pieces_sum
+#        .join(q3d_inv, "inventory_id")
+#        .groupBy("set_num")
+#        .agg(F.sum("inventory_pieces").alias("total_pieces"))
+#    )
+#    ```
+# 
+# 4. **Combine the pre-aggregated branches** with a small join:
+# 
+#    ```python
+#    q3d_fix_df = (
+#        colors_agg
+#        .join(pieces_agg, "set_num")
+#        .select("set_num", "set_name", "theme_name", "distinct_colors", "total_pieces")
+#        .orderBy(F.desc("distinct_colors"), F.desc("total_pieces"), "set_num")
+#        .limit(20)
+#    )
+#    ```
+# 
+# Because the heavy lifting (distinct + sum) happens **before** we touch dimensions, the joins operate on much smaller DataFrames, which reduces shuffle volume and runtime.
+# 
+# ---
+# 
+# #### Execution flow comparison
+# 
+# - **Problem:**
+#   - _large fact → join to all dimensions → groupBy + countDistinct + sum_
+#   - Shuffles the entire joined dataset; `countDistinct` runs on maximal data.
+# 
+# - **Fix:**
+#   - _large fact → pre-aggregate per inventory (distinct colors + pieces) → join much smaller aggregates to dimensions → final small join between aggregates_
+#   - Greatly reduced shuffle and a more scalable query plan.
+# 
+# ---
+# 
+# > 📝 **Key Takeaway:** When you see **join-then-aggregate** on a large fact table, look for opportunities to **pre-aggregate or de-duplicate early**. Push `distinct` and `sum` operations as close to the fact table as possible, then join the smaller aggregates to dimension tables and combine them at the end.
 
 
 # MARKDOWN ********************
