@@ -65,10 +65,8 @@
 # METADATA ********************
 
 # META {
-# META   "microsoft": {
-# META     "language": "python",
-# META     "language_group": "synapse_pyspark"
-# META   }
+# META   "language": "python",
+# META   "language_group": "synapse_pyspark"
 # META }
 
 # CELL ********************
@@ -103,10 +101,8 @@ print("Spark application ID:", spark.sparkContext.applicationId)
 # METADATA ********************
 
 # META {
-# META   "microsoft": {
-# META     "language": "python",
-# META     "language_group": "synapse_pyspark"
-# META   }
+# META   "language": "python",
+# META   "language_group": "synapse_pyspark"
 # META }
 
 # CELL ********************
@@ -122,10 +118,8 @@ for metric in TABLE_METRICS.values(): print("TABLE_METRIC|"+json.dumps(metric, s
 # METADATA ********************
 
 # META {
-# META   "microsoft": {
-# META     "language": "python",
-# META     "language_group": "synapse_pyspark"
-# META   }
+# META   "language": "python",
+# META   "language_group": "synapse_pyspark"
 # META }
 
 # MARKDOWN ********************
@@ -191,10 +185,8 @@ q3a_parts = (
 # METADATA ********************
 
 # META {
-# META   "microsoft": {
-# META     "language": "python",
-# META     "language_group": "synapse_pyspark"
-# META   }
+# META   "language": "python",
+# META   "language_group": "synapse_pyspark"
 # META }
 
 # CELL ********************
@@ -228,10 +220,8 @@ display(q3a_problem_rows)
 # METADATA ********************
 
 # META {
-# META   "microsoft": {
-# META     "language": "python",
-# META     "language_group": "synapse_pyspark"
-# META   }
+# META   "language": "python",
+# META   "language_group": "synapse_pyspark"
 # META }
 
 # CELL ********************
@@ -258,10 +248,8 @@ print(f"Contains Exchange hashpartitioning: {has_exchange}")
 # METADATA ********************
 
 # META {
-# META   "microsoft": {
-# META     "language": "python",
-# META     "language_group": "synapse_pyspark"
-# META   }
+# META   "language": "python",
+# META   "language_group": "synapse_pyspark"
 # META }
 
 # CELL ********************
@@ -294,10 +282,8 @@ restore_conf("spark.sql.autoBroadcastJoinThreshold")
 # METADATA ********************
 
 # META {
-# META   "microsoft": {
-# META     "language": "python",
-# META     "language_group": "synapse_pyspark"
-# META   }
+# META   "language": "python",
+# META   "language_group": "synapse_pyspark"
 # META }
 
 # CELL ********************
@@ -324,10 +310,8 @@ print(f"Contains Exchange hashpartitioning: {fix_has_exchange}")
 # METADATA ********************
 
 # META {
-# META   "microsoft": {
-# META     "language": "python",
-# META     "language_group": "synapse_pyspark"
-# META   }
+# META   "language": "python",
+# META   "language_group": "synapse_pyspark"
 # META }
 
 # MARKDOWN ********************
@@ -444,10 +428,8 @@ spark.conf.set("spark.sql.adaptive.advisoryPartitionSizeInBytes", "64MB")
 # METADATA ********************
 
 # META {
-# META   "microsoft": {
-# META     "language": "python",
-# META     "language_group": "synapse_pyspark"
-# META   }
+# META   "language": "python",
+# META   "language_group": "synapse_pyspark"
 # META }
 
 # CELL ********************
@@ -474,10 +456,8 @@ display(q3b_problem_rows)
 # METADATA ********************
 
 # META {
-# META   "microsoft": {
-# META     "language": "python",
-# META     "language_group": "synapse_pyspark"
-# META   }
+# META   "language": "python",
+# META   "language_group": "synapse_pyspark"
 # META }
 
 # CELL ********************
@@ -507,10 +487,8 @@ plt.show()
 # METADATA ********************
 
 # META {
-# META   "microsoft": {
-# META     "language": "python",
-# META     "language_group": "synapse_pyspark"
-# META   }
+# META   "language": "python",
+# META   "language_group": "synapse_pyspark"
 # META }
 
 # CELL ********************
@@ -562,10 +540,8 @@ display(q3b_fix_salted_rows)
 # METADATA ********************
 
 # META {
-# META   "microsoft": {
-# META     "language": "python",
-# META     "language_group": "synapse_pyspark"
-# META   }
+# META   "language": "python",
+# META   "language_group": "synapse_pyspark"
 # META }
 
 # CELL ********************
@@ -593,10 +569,8 @@ display(q3b_fix_hint_rows)
 # METADATA ********************
 
 # META {
-# META   "microsoft": {
-# META     "language": "python",
-# META     "language_group": "synapse_pyspark"
-# META   }
+# META   "language": "python",
+# META   "language_group": "synapse_pyspark"
 # META }
 
 # CELL ********************
@@ -627,10 +601,8 @@ display(q3b_fix_aqe_rows)
 # METADATA ********************
 
 # META {
-# META   "microsoft": {
-# META     "language": "python",
-# META     "language_group": "synapse_pyspark"
-# META   }
+# META   "language": "python",
+# META   "language_group": "synapse_pyspark"
 # META }
 
 # CELL ********************
@@ -643,10 +615,8 @@ restore_conf("spark.sql.adaptive.advisoryPartitionSizeInBytes")
 # METADATA ********************
 
 # META {
-# META   "microsoft": {
-# META     "language": "python",
-# META     "language_group": "synapse_pyspark"
-# META   }
+# META   "language": "python",
+# META   "language_group": "synapse_pyspark"
 # META }
 
 # MARKDOWN ********************
@@ -793,10 +763,8 @@ q3c_sets_with_parts.write.mode("overwrite").saveAsTable(table_ref("q3c_sets_with
 # METADATA ********************
 
 # META {
-# META   "microsoft": {
-# META     "language": "python",
-# META     "language_group": "synapse_pyspark"
-# META   }
+# META   "language": "python",
+# META   "language_group": "synapse_pyspark"
 # META }
 
 # CELL ********************
@@ -854,10 +822,8 @@ display(q3c_problem_rows)
 # METADATA ********************
 
 # META {
-# META   "microsoft": {
-# META     "language": "python",
-# META     "language_group": "synapse_pyspark"
-# META   }
+# META   "language": "python",
+# META   "language_group": "synapse_pyspark"
 # META }
 
 # CELL ********************
@@ -916,10 +882,8 @@ print(json.dumps(details, indent=2))
 # METADATA ********************
 
 # META {
-# META   "microsoft": {
-# META     "language": "python",
-# META     "language_group": "synapse_pyspark"
-# META   }
+# META   "language": "python",
+# META   "language_group": "synapse_pyspark"
 # META }
 
 # CELL ********************
@@ -999,10 +963,8 @@ restore_conf("spark.sql.autoBroadcastJoinThreshold")
 # METADATA ********************
 
 # META {
-# META   "microsoft": {
-# META     "language": "python",
-# META     "language_group": "synapse_pyspark"
-# META   }
+# META   "language": "python",
+# META   "language_group": "synapse_pyspark"
 # META }
 
 # CELL ********************
@@ -1027,10 +989,8 @@ print(f"Fix plan has filter: {'filter' in q3c_fix_plan.lower()}")
 # METADATA ********************
 
 # META {
-# META   "microsoft": {
-# META     "language": "python",
-# META     "language_group": "synapse_pyspark"
-# META   }
+# META   "language": "python",
+# META   "language_group": "synapse_pyspark"
 # META }
 
 # MARKDOWN ********************
@@ -1166,10 +1126,8 @@ q3d_themes=spark.table(table_ref("themes")).select(F.col("id").alias("theme_id")
 # METADATA ********************
 
 # META {
-# META   "microsoft": {
-# META     "language": "python",
-# META     "language_group": "synapse_pyspark"
-# META   }
+# META   "language": "python",
+# META   "language_group": "synapse_pyspark"
 # META }
 
 # CELL ********************
@@ -1198,10 +1156,8 @@ display(q3d_problem_rows)
 # METADATA ********************
 
 # META {
-# META   "microsoft": {
-# META     "language": "python",
-# META     "language_group": "synapse_pyspark"
-# META   }
+# META   "language": "python",
+# META   "language_group": "synapse_pyspark"
 # META }
 
 # CELL ********************
@@ -1218,10 +1174,8 @@ print(q3d_problem_plan); record("3D","investigation","complete",INVESTIGATIONS["
 # METADATA ********************
 
 # META {
-# META   "microsoft": {
-# META     "language": "python",
-# META     "language_group": "synapse_pyspark"
-# META   }
+# META   "language": "python",
+# META   "language_group": "synapse_pyspark"
 # META }
 
 # CELL ********************
@@ -1274,10 +1228,8 @@ display(q3d_fix_rows)
 # METADATA ********************
 
 # META {
-# META   "microsoft": {
-# META     "language": "python",
-# META     "language_group": "synapse_pyspark"
-# META   }
+# META   "language": "python",
+# META   "language_group": "synapse_pyspark"
 # META }
 
 # CELL ********************
@@ -1293,10 +1245,8 @@ fix_has_exchange
 # METADATA ********************
 
 # META {
-# META   "microsoft": {
-# META     "language": "python",
-# META     "language_group": "synapse_pyspark"
-# META   }
+# META   "language": "python",
+# META   "language_group": "synapse_pyspark"
 # META }
 
 # MARKDOWN ********************
@@ -1375,10 +1325,8 @@ print(f"manufacturing_event: {TABLE_METRICS['manufacturing_event']['numFiles']:,
 # METADATA ********************
 
 # META {
-# META   "microsoft": {
-# META     "language": "python",
-# META     "language_group": "synapse_pyspark"
-# META   }
+# META   "language": "python",
+# META   "language_group": "synapse_pyspark"
 # META }
 
 # CELL ********************
@@ -1423,10 +1371,8 @@ streaming_query.awaitTermination()
 # METADATA ********************
 
 # META {
-# META   "microsoft": {
-# META     "language": "python",
-# META     "language_group": "synapse_pyspark"
-# META   }
+# META   "language": "python",
+# META   "language_group": "synapse_pyspark"
 # META }
 
 # CELL ********************
@@ -1445,10 +1391,8 @@ print(f"Number of rows dropped by watermark: {num_rows_dropped_by_watermark}")
 # METADATA ********************
 
 # META {
-# META   "microsoft": {
-# META     "language": "python",
-# META     "language_group": "synapse_pyspark"
-# META   }
+# META   "language": "python",
+# META   "language_group": "synapse_pyspark"
 # META }
 
 # CELL ********************
@@ -1494,10 +1438,8 @@ streaming_query.awaitTermination()
 # METADATA ********************
 
 # META {
-# META   "microsoft": {
-# META     "language": "python",
-# META     "language_group": "synapse_pyspark"
-# META   }
+# META   "language": "python",
+# META   "language_group": "synapse_pyspark"
 # META }
 
 # CELL ********************
@@ -1517,10 +1459,8 @@ print(f"Number of rows dropped by watermark: {num_rows_dropped_by_watermark}")
 # METADATA ********************
 
 # META {
-# META   "microsoft": {
-# META     "language": "python",
-# META     "language_group": "synapse_pyspark"
-# META   }
+# META   "language": "python",
+# META   "language_group": "synapse_pyspark"
 # META }
 
 # MARKDOWN ********************

@@ -88,10 +88,8 @@
 # METADATA ********************
 
 # META {
-# META   "microsoft": {
-# META     "language": "python",
-# META     "language_group": "synapse_pyspark"
-# META   }
+# META   "language": "python",
+# META   "language_group": "synapse_pyspark"
 # META }
 
 # CELL ********************
@@ -149,10 +147,8 @@ spark.conf.set("spark.synapse.vegas.useCache", "false")
 # METADATA ********************
 
 # META {
-# META   "microsoft": {
-# META     "language": "python",
-# META     "language_group": "synapse_pyspark"
-# META   }
+# META   "language": "python",
+# META   "language_group": "synapse_pyspark"
 # META }
 
 # CELL ********************
@@ -202,10 +198,8 @@ display(TABLE_METRICS)
 # METADATA ********************
 
 # META {
-# META   "microsoft": {
-# META     "language": "python",
-# META     "language_group": "synapse_pyspark"
-# META   }
+# META   "language": "python",
+# META   "language_group": "synapse_pyspark"
 # META }
 
 # MARKDOWN ********************
@@ -240,10 +234,8 @@ latest_day
 # METADATA ********************
 
 # META {
-# META   "microsoft": {
-# META     "language": "python",
-# META     "language_group": "synapse_pyspark"
-# META   }
+# META   "language": "python",
+# META   "language_group": "synapse_pyspark"
 # META }
 
 # CELL ********************
@@ -274,10 +266,8 @@ display(data)
 # METADATA ********************
 
 # META {
-# META   "microsoft": {
-# META     "language": "python",
-# META     "language_group": "synapse_pyspark"
-# META   }
+# META   "language": "python",
+# META   "language_group": "synapse_pyspark"
 # META }
 
 # CELL ********************
@@ -307,10 +297,8 @@ print(json.dumps({
 # METADATA ********************
 
 # META {
-# META   "microsoft": {
-# META     "language": "python",
-# META     "language_group": "synapse_pyspark"
-# META   }
+# META   "language": "python",
+# META   "language_group": "synapse_pyspark"
 # META }
 
 # MARKDOWN ********************
@@ -336,10 +324,8 @@ result_q1.explain(mode="formatted")
 # METADATA ********************
 
 # META {
-# META   "microsoft": {
-# META     "language": "python",
-# META     "language_group": "synapse_pyspark"
-# META   }
+# META   "language": "python",
+# META   "language_group": "synapse_pyspark"
 # META }
 
 # CELL ********************
@@ -368,10 +354,8 @@ display(data)
 # METADATA ********************
 
 # META {
-# META   "microsoft": {
-# META     "language": "python",
-# META     "language_group": "synapse_pyspark"
-# META   }
+# META   "language": "python",
+# META   "language_group": "synapse_pyspark"
 # META }
 
 # CELL ********************
@@ -403,10 +387,8 @@ print(json.dumps({
 # METADATA ********************
 
 # META {
-# META   "microsoft": {
-# META     "language": "python",
-# META     "language_group": "synapse_pyspark"
-# META   }
+# META   "language": "python",
+# META   "language_group": "synapse_pyspark"
 # META }
 
 # CELL ********************
@@ -416,10 +398,8 @@ result_q1.explain(mode="formatted")
 # METADATA ********************
 
 # META {
-# META   "microsoft": {
-# META     "language": "python",
-# META     "language_group": "synapse_pyspark"
-# META   }
+# META   "language": "python",
+# META   "language_group": "synapse_pyspark"
 # META }
 
 # MARKDOWN ********************
@@ -450,10 +430,8 @@ show_metrics("bronze.web_order", "baseline")
 # METADATA ********************
 
 # META {
-# META   "microsoft": {
-# META     "language": "python",
-# META     "language_group": "synapse_pyspark"
-# META   }
+# META   "language": "python",
+# META   "language_group": "synapse_pyspark"
 # META }
 
 # CELL ********************
@@ -506,10 +484,8 @@ display(data)
 # METADATA ********************
 
 # META {
-# META   "microsoft": {
-# META     "language": "python",
-# META     "language_group": "synapse_pyspark"
-# META   }
+# META   "language": "python",
+# META   "language_group": "synapse_pyspark"
 # META }
 
 # CELL ********************
@@ -534,10 +510,8 @@ print(json.dumps({
 # METADATA ********************
 
 # META {
-# META   "microsoft": {
-# META     "language": "python",
-# META     "language_group": "synapse_pyspark"
-# META   }
+# META   "language": "python",
+# META   "language_group": "synapse_pyspark"
 # META }
 
 # MARKDOWN ********************
@@ -565,10 +539,8 @@ result_q2.explain(mode="formatted")
 # METADATA ********************
 
 # META {
-# META   "microsoft": {
-# META     "language": "python",
-# META     "language_group": "synapse_pyspark"
-# META   }
+# META   "language": "python",
+# META   "language_group": "synapse_pyspark"
 # META }
 
 # CELL ********************
@@ -611,10 +583,8 @@ display(data)
 # METADATA ********************
 
 # META {
-# META   "microsoft": {
-# META     "language": "python",
-# META     "language_group": "synapse_pyspark"
-# META   }
+# META   "language": "python",
+# META   "language_group": "synapse_pyspark"
 # META }
 
 # CELL ********************
@@ -639,10 +609,8 @@ print(json.dumps({
 # METADATA ********************
 
 # META {
-# META   "microsoft": {
-# META     "language": "python",
-# META     "language_group": "synapse_pyspark"
-# META   }
+# META   "language": "python",
+# META   "language_group": "synapse_pyspark"
 # META }
 
 # CELL ********************
@@ -652,10 +620,8 @@ result_q2_fixed.explain(mode="formatted")
 # METADATA ********************
 
 # META {
-# META   "microsoft": {
-# META     "language": "python",
-# META     "language_group": "synapse_pyspark"
-# META   }
+# META   "language": "python",
+# META   "language_group": "synapse_pyspark"
 # META }
 
 # MARKDOWN ********************
@@ -687,10 +653,8 @@ show_metrics("bronze.inventory_transaction", "baseline")
 # METADATA ********************
 
 # META {
-# META   "microsoft": {
-# META     "language": "python",
-# META     "language_group": "synapse_pyspark"
-# META   }
+# META   "language": "python",
+# META   "language_group": "synapse_pyspark"
 # META }
 
 # CELL ********************
@@ -725,10 +689,8 @@ display(result_q3)
 # METADATA ********************
 
 # META {
-# META   "microsoft": {
-# META     "language": "python",
-# META     "language_group": "synapse_pyspark"
-# META   }
+# META   "language": "python",
+# META   "language_group": "synapse_pyspark"
 # META }
 
 # CELL ********************
@@ -748,10 +710,8 @@ print(json.dumps({
 # METADATA ********************
 
 # META {
-# META   "microsoft": {
-# META     "language": "python",
-# META     "language_group": "synapse_pyspark"
-# META   }
+# META   "language": "python",
+# META   "language_group": "synapse_pyspark"
 # META }
 
 # MARKDOWN ********************
@@ -801,10 +761,8 @@ display(data)
 # METADATA ********************
 
 # META {
-# META   "microsoft": {
-# META     "language": "python",
-# META     "language_group": "synapse_pyspark"
-# META   }
+# META   "language": "python",
+# META   "language_group": "synapse_pyspark"
 # META }
 
 # CELL ********************
@@ -826,10 +784,8 @@ print(json.dumps({
 # METADATA ********************
 
 # META {
-# META   "microsoft": {
-# META     "language": "python",
-# META     "language_group": "synapse_pyspark"
-# META   }
+# META   "language": "python",
+# META   "language_group": "synapse_pyspark"
 # META }
 
 # MARKDOWN ********************
@@ -861,10 +817,8 @@ show_metrics("bronze.web_order", "baseline")
 # METADATA ********************
 
 # META {
-# META   "microsoft": {
-# META     "language": "python",
-# META     "language_group": "synapse_pyspark"
-# META   }
+# META   "language": "python",
+# META   "language_group": "synapse_pyspark"
 # META }
 
 # CELL ********************
@@ -909,10 +863,8 @@ print(f"Quarantine: {len(quarantine_rows)} rows")
 # METADATA ********************
 
 # META {
-# META   "microsoft": {
-# META     "language": "python",
-# META     "language_group": "synapse_pyspark"
-# META   }
+# META   "language": "python",
+# META   "language_group": "synapse_pyspark"
 # META }
 
 # CELL ********************
@@ -940,10 +892,8 @@ print(json.dumps({
 # METADATA ********************
 
 # META {
-# META   "microsoft": {
-# META     "language": "python",
-# META     "language_group": "synapse_pyspark"
-# META   }
+# META   "language": "python",
+# META   "language_group": "synapse_pyspark"
 # META }
 
 # MARKDOWN ********************
@@ -1008,10 +958,8 @@ print(f"Quarantine: {len(quarantine_rows_fixed)} rows")
 # METADATA ********************
 
 # META {
-# META   "microsoft": {
-# META     "language": "python",
-# META     "language_group": "synapse_pyspark"
-# META   }
+# META   "language": "python",
+# META   "language_group": "synapse_pyspark"
 # META }
 
 # CELL ********************
@@ -1049,10 +997,8 @@ print(json.dumps({
 # METADATA ********************
 
 # META {
-# META   "microsoft": {
-# META     "language": "python",
-# META     "language_group": "synapse_pyspark"
-# META   }
+# META   "language": "python",
+# META   "language_group": "synapse_pyspark"
 # META }
 
 # CELL ********************
@@ -1064,10 +1010,8 @@ defect_df.explain(mode="formatted")
 # METADATA ********************
 
 # META {
-# META   "microsoft": {
-# META     "language": "python",
-# META     "language_group": "synapse_pyspark"
-# META   }
+# META   "language": "python",
+# META   "language_group": "synapse_pyspark"
 # META }
 
 # MARKDOWN ********************
@@ -1101,10 +1045,8 @@ show_metrics("bronze.web_order", "baseline")
 # METADATA ********************
 
 # META {
-# META   "microsoft": {
-# META     "language": "python",
-# META     "language_group": "synapse_pyspark"
-# META   }
+# META   "language": "python",
+# META   "language_group": "synapse_pyspark"
 # META }
 
 # CELL ********************
@@ -1145,10 +1087,8 @@ display(rows_q5)
 # METADATA ********************
 
 # META {
-# META   "microsoft": {
-# META     "language": "python",
-# META     "language_group": "synapse_pyspark"
-# META   }
+# META   "language": "python",
+# META   "language_group": "synapse_pyspark"
 # META }
 
 # CELL ********************
@@ -1174,10 +1114,8 @@ print(json.dumps({
 # METADATA ********************
 
 # META {
-# META   "microsoft": {
-# META     "language": "python",
-# META     "language_group": "synapse_pyspark"
-# META   }
+# META   "language": "python",
+# META   "language_group": "synapse_pyspark"
 # META }
 
 # MARKDOWN ********************
@@ -1206,10 +1144,8 @@ result_q5.explain(mode="formatted")
 # METADATA ********************
 
 # META {
-# META   "microsoft": {
-# META     "language": "python",
-# META     "language_group": "synapse_pyspark"
-# META   }
+# META   "language": "python",
+# META   "language_group": "synapse_pyspark"
 # META }
 
 # CELL ********************
@@ -1251,10 +1187,8 @@ display(rows_q5_fixed)
 # METADATA ********************
 
 # META {
-# META   "microsoft": {
-# META     "language": "python",
-# META     "language_group": "synapse_pyspark"
-# META   }
+# META   "language": "python",
+# META   "language_group": "synapse_pyspark"
 # META }
 
 # CELL ********************
@@ -1281,10 +1215,8 @@ print(json.dumps({
 # METADATA ********************
 
 # META {
-# META   "microsoft": {
-# META     "language": "python",
-# META     "language_group": "synapse_pyspark"
-# META   }
+# META   "language": "python",
+# META   "language_group": "synapse_pyspark"
 # META }
 
 # CELL ********************
@@ -1294,10 +1226,8 @@ result_q5_fixed.explain(mode="formatted")
 # METADATA ********************
 
 # META {
-# META   "microsoft": {
-# META     "language": "python",
-# META     "language_group": "synapse_pyspark"
-# META   }
+# META   "language": "python",
+# META   "language_group": "synapse_pyspark"
 # META }
 
 # MARKDOWN ********************
@@ -1329,10 +1259,8 @@ show_metrics("bronze.manufacturing_event", "baseline")
 # METADATA ********************
 
 # META {
-# META   "microsoft": {
-# META     "language": "python",
-# META     "language_group": "synapse_pyspark"
-# META   }
+# META   "language": "python",
+# META   "language_group": "synapse_pyspark"
 # META }
 
 # CELL ********************
@@ -1363,10 +1291,8 @@ display(rows_q6)
 # METADATA ********************
 
 # META {
-# META   "microsoft": {
-# META     "language": "python",
-# META     "language_group": "synapse_pyspark"
-# META   }
+# META   "language": "python",
+# META   "language_group": "synapse_pyspark"
 # META }
 
 # CELL ********************
@@ -1392,10 +1318,8 @@ print(json.dumps({
 # METADATA ********************
 
 # META {
-# META   "microsoft": {
-# META     "language": "python",
-# META     "language_group": "synapse_pyspark"
-# META   }
+# META   "language": "python",
+# META   "language_group": "synapse_pyspark"
 # META }
 
 # MARKDOWN ********************
@@ -1424,10 +1348,8 @@ result_q6.explain(mode="formatted")
 # METADATA ********************
 
 # META {
-# META   "microsoft": {
-# META     "language": "python",
-# META     "language_group": "synapse_pyspark"
-# META   }
+# META   "language": "python",
+# META   "language_group": "synapse_pyspark"
 # META }
 
 # CELL ********************
@@ -1456,10 +1378,8 @@ display(rows_q6_fixed)
 # METADATA ********************
 
 # META {
-# META   "microsoft": {
-# META     "language": "python",
-# META     "language_group": "synapse_pyspark"
-# META   }
+# META   "language": "python",
+# META   "language_group": "synapse_pyspark"
 # META }
 
 # CELL ********************
@@ -1487,10 +1407,8 @@ print(json.dumps({
 # METADATA ********************
 
 # META {
-# META   "microsoft": {
-# META     "language": "python",
-# META     "language_group": "synapse_pyspark"
-# META   }
+# META   "language": "python",
+# META   "language_group": "synapse_pyspark"
 # META }
 
 # CELL ********************
@@ -1500,10 +1418,8 @@ result_q6_fixed.explain(mode="formatted")
 # METADATA ********************
 
 # META {
-# META   "microsoft": {
-# META     "language": "python",
-# META     "language_group": "synapse_pyspark"
-# META   }
+# META   "language": "python",
+# META   "language_group": "synapse_pyspark"
 # META }
 
 # CELL ********************
@@ -1521,8 +1437,6 @@ print_all_scenarios()
 # METADATA ********************
 
 # META {
-# META   "microsoft": {
-# META     "language": "python",
-# META     "language_group": "synapse_pyspark"
-# META   }
+# META   "language": "python",
+# META   "language_group": "synapse_pyspark"
 # META }
