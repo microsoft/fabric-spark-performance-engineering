@@ -26,23 +26,52 @@
 
 # MARKDOWN ********************
 
-# # Lab 1: Diagnostics - The Factory Dashboard is Slow
-# 
-# This read-only notebook reproduces the six diagnostics prompts from the workshop repository for the LEGO factory dashboard. Run the cells and use the Spark UI / Monitoring Hub to identify the anti-pattern behind each slow query.
-# 
-# **Workspace:** `dpns_2026_spark_performance`  
-# **Lakehouse:** `Lego`  
-# **Schema:** `bronze`
-# 
-# **🔄 Switch Experience:**  
-# Looking for the SQL version? Check out [01-lab-diagnostics-factory-dashboard-slow-sql](../01-lab-diagnostics-factory-dashboard-slow-sql/01-lab-diagnostics-factory-dashboard-slow-sql.ipynb)
-# 
-# The notebook intentionally runs inefficient read-only queries. It does not create, update, delete, optimize, vacuum, analyze, or write any lakehouse data.
+# # 🏗️ **Module 1: Diagnostics – The Factory Dashboard is Slow**
+#
+# Learn how to identify common Spark performance anti‑patterns behind a slow Power BI / Fabric dashboard, diagnose them using Spark plans and the UI, apply targeted fixes, and validate the impact with before‑and‑after benchmarks.
+#
+# You’ll work through six realistic queries that power a LEGO manufacturing analytics dashboard:
+#
+# 1. **Daily defect rate by machine** – predicate pushdown and partition pruning
+# 2. **Top customers by spend** – Python UDF overhead vs. built‑in functions
+# 3. **Inventory levels by plant/line** – driver‑side `.collect()` vs. distributed aggregation
+# 4. **Event fan‑out by defect type** – repeated scans vs. caching shared intermediates
+# 5. **Quality inspection pass rates** – Cartesian joins from missing join predicates
+# 6. **Event aggregation by day** – unnecessary caching and Native Execution Engine (NEE) fallback
+#
+# **Duration:** 60 minutes | **Level:** 300–400
+#
+# ---
+#
+# ### Scenario
+#
+# The LEGO manufacturing analytics team has built a factory quality and operations dashboard backed by Spark queries over Lakehouse tables (bronze layer). Over time, the dashboard has become noticeably slower as data volumes and usage have grown.
+#
+# Your investigation reveals that several visuals are powered by inefficient Spark patterns:
+# - Full table scans without effective predicate pushdown
+# - Python UDFs blocking NEE optimizations
+# - Driver‑side `.collect()` and Python loops
+# - Repeated scans when branching to multiple outputs
+# - Cartesian joins due to missing join keys
+# - Unnecessary caching that adds overhead and can trigger NEE fallbacks
+#
+# **Your mission:** For each query, benchmark the current behavior, diagnose the root cause using plans and metrics, implement a fix, and re‑benchmark to quantify the improvement.
+#
+# ### Lab Pattern
+#
+# Every exercise follows the same steps:
+#
+# | Step | What you do |
+# |------|-------------|
+# | 🐌 **Benchmark** | Run a query and capture the baseline time/metric |
+# | 🔍 **Diagnose** | Inspect table metadata and Spark plans to prove the root cause |
+# | 🔧 **Fix** | Apply the optimization using recommended Spark patterns |
+# | 🚀 **Re-benchmark** | Run the same test and compare against the baseline |
 
 # MARKDOWN ********************
 
 # ## Expected diagnostic prompts
-# 
+#
 # | Prompt | Scenario | Expected signal |
 # |---|---|---|
 # | Q1 | Daily defect rate by machine | Full scan / poor predicate pushdown from string timestamp handling |
@@ -50,7 +79,7 @@
 # | Q3 | Inventory levels by plant/line | Driver-side `.collect()` anti-pattern |
 # | Q4 | Manufacturing event fan-out by event type | Repeated scans from looped writes with no caching |
 # | Q5 | Quality inspection pass rates | Cartesian/nested-loop join from missing join key |
-# | Q6 | Monthly revenue trend | Tiny-file scan overhead on existing `web_order` Delta table |
+# | Q6 | Event aggregation by day | Unnecessary cache causing extra materialization and possible NEE fallback |
 
 # CELL ********************
 
@@ -59,8 +88,10 @@
 # METADATA ********************
 
 # META {
-# META   "language": "python",
-# META   "language_group": "synapse_pyspark"
+# META   "microsoft": {
+# META     "language": "python",
+# META     "language_group": "synapse_pyspark"
+# META   }
 # META }
 
 # CELL ********************
@@ -71,6 +102,7 @@ import json
 import time
 import regex
 
+from pyspark.sql import SparkSession
 from pyspark.sql import functions as F
 from pyspark.sql.types import DoubleType
 
@@ -117,8 +149,10 @@ spark.conf.set("spark.synapse.vegas.useCache", "false")
 # METADATA ********************
 
 # META {
-# META   "language": "python",
-# META   "language_group": "synapse_pyspark"
+# META   "microsoft": {
+# META     "language": "python",
+# META     "language_group": "synapse_pyspark"
+# META   }
 # META }
 
 # CELL ********************
@@ -165,30 +199,31 @@ for name in expected_tables:
 
 display(TABLE_METRICS)
 
-
 # METADATA ********************
 
 # META {
-# META   "language": "python",
-# META   "language_group": "synapse_pyspark"
+# META   "microsoft": {
+# META     "language": "python",
+# META     "language_group": "synapse_pyspark"
+# META   }
 # META }
 
 # MARKDOWN ********************
 
 # ---
-# 
+#
 # # Query 1: Daily defect rate by machine
-# 
+#
 # **Table:** `manufacturing_event` — high-frequency IoT telemetry from the injection molding floor
-# 
+#
 # **What's wrong:** This query filters with string transformations on nested timestamp fields. The table is not partition-pruned for the time window, so Spark should scan substantially more input than the dashboard result needs.
-# 
+#
 # **Why it matters:**
 # - Full table scans are expensive and slow, especially on large datasets
 # - Increases I/O and memory usage, leading to potential performance bottlenecks
-# 
+#
 # **Fix:** Appropriate predicate pushdown
-# 
+#
 # ---
 
 # CELL ********************
@@ -205,8 +240,10 @@ latest_day
 # METADATA ********************
 
 # META {
-# META   "language": "python",
-# META   "language_group": "synapse_pyspark"
+# META   "microsoft": {
+# META     "language": "python",
+# META     "language_group": "synapse_pyspark"
+# META   }
 # META }
 
 # CELL ********************
@@ -237,8 +274,10 @@ display(data)
 # METADATA ********************
 
 # META {
-# META   "language": "python",
-# META   "language_group": "synapse_pyspark"
+# META   "microsoft": {
+# META     "language": "python",
+# META     "language_group": "synapse_pyspark"
+# META   }
 # META }
 
 # CELL ********************
@@ -268,20 +307,22 @@ print(json.dumps({
 # METADATA ********************
 
 # META {
-# META   "language": "python",
-# META   "language_group": "synapse_pyspark"
+# META   "microsoft": {
+# META     "language": "python",
+# META     "language_group": "synapse_pyspark"
+# META   }
 # META }
 
 # MARKDOWN ********************
 
 # ### 🎯 Challenge: Check the Spark Plan and Spark UI to diagnose the problem
-# 
+#
 # You've seen that the query is slow, and you suspect it's because of the large number of files and the filter not being pushed down. You want to confirm this by checking the Spark Plan and the Spark UI.
-# 
+#
 # **Your task:** Check the Spark Plan and Spark UI to confirm that the query is doing a full scan of all files and that the filter on `event_day` is not being pushed down to the file scan level.
-# 
+#
 # > 💡 Hint: **Explain** methods in Spark can help you understand the physical plan and see if filters are being pushed down.
-# 
+#
 # Try it in the cell below!
 
 # CELL ********************
@@ -295,8 +336,10 @@ result_q1.explain(mode="formatted")
 # METADATA ********************
 
 # META {
-# META   "language": "python",
-# META   "language_group": "synapse_pyspark"
+# META   "microsoft": {
+# META     "language": "python",
+# META     "language_group": "synapse_pyspark"
+# META   }
 # META }
 
 # CELL ********************
@@ -325,8 +368,10 @@ display(data)
 # METADATA ********************
 
 # META {
-# META   "language": "python",
-# META   "language_group": "synapse_pyspark"
+# META   "microsoft": {
+# META     "language": "python",
+# META     "language_group": "synapse_pyspark"
+# META   }
 # META }
 
 # CELL ********************
@@ -358,8 +403,10 @@ print(json.dumps({
 # METADATA ********************
 
 # META {
-# META   "language": "python",
-# META   "language_group": "synapse_pyspark"
+# META   "microsoft": {
+# META     "language": "python",
+# META     "language_group": "synapse_pyspark"
+# META   }
 # META }
 
 # CELL ********************
@@ -369,26 +416,28 @@ result_q1.explain(mode="formatted")
 # METADATA ********************
 
 # META {
-# META   "language": "python",
-# META   "language_group": "synapse_pyspark"
+# META   "microsoft": {
+# META     "language": "python",
+# META     "language_group": "synapse_pyspark"
+# META   }
 # META }
 
 # MARKDOWN ********************
 
 # ---
-# 
+#
 # # Query 2: Top 10 customers by spend
-# 
+#
 # ---
-# 
+#
 # **Table:** `web_order` — customer orders with nested order line items
-# 
+#
 # **Fix:** Replace Python UDFs with native Spark SQL expressions
-# 
+#
 # **What's wrong:** This query uses Python UDFs to calculate line totals and extract date strings, forcing Python serialization overhead and preventing Native Execution Engine optimization.
-# 
+#
 # - Significantly slower than built-in Spark SQL functions
-# 
+#
 # **Why it matters:**- Cannot leverage Native Execution Engine (NEE) optimizations
 # - Python UDFs require data serialization between JVM and Python processes
 
@@ -401,8 +450,10 @@ show_metrics("bronze.web_order", "baseline")
 # METADATA ********************
 
 # META {
-# META   "language": "python",
-# META   "language_group": "synapse_pyspark"
+# META   "microsoft": {
+# META     "language": "python",
+# META     "language_group": "synapse_pyspark"
+# META   }
 # META }
 
 # CELL ********************
@@ -455,8 +506,10 @@ display(data)
 # METADATA ********************
 
 # META {
-# META   "language": "python",
-# META   "language_group": "synapse_pyspark"
+# META   "microsoft": {
+# META     "language": "python",
+# META     "language_group": "synapse_pyspark"
+# META   }
 # META }
 
 # CELL ********************
@@ -481,22 +534,24 @@ print(json.dumps({
 # METADATA ********************
 
 # META {
-# META   "language": "python",
-# META   "language_group": "synapse_pyspark"
+# META   "microsoft": {
+# META     "language": "python",
+# META     "language_group": "synapse_pyspark"
+# META   }
 # META }
 
 # MARKDOWN ********************
 
 # ### 🎯 Challenge: Check the Spark Plan to find Python UDF overhead
-# 
+#
 # You've seen that the query is slow, and you suspect it's because of Python UDF serialization overhead preventing Native Execution Engine optimization.
-# 
+#
 # **Your task:** Check the Spark Plan to confirm that:
 # 1. The query uses Python UDFs (look for `BatchEvalPython` or `PythonUDF`)
 # 2. There are Native Execution Engine fallbacks (look for `RowToVeloxColumnar` and `VeloxColumnarToRow` blocks)
-# 
+#
 # > 💡 Hint: **Explain** methods in Spark can help you understand the physical plan and identify Python UDF operations.
-# 
+#
 # Try it in the cell below!
 
 # CELL ********************
@@ -510,8 +565,10 @@ result_q2.explain(mode="formatted")
 # METADATA ********************
 
 # META {
-# META   "language": "python",
-# META   "language_group": "synapse_pyspark"
+# META   "microsoft": {
+# META     "language": "python",
+# META     "language_group": "synapse_pyspark"
+# META   }
 # META }
 
 # CELL ********************
@@ -554,8 +611,10 @@ display(data)
 # METADATA ********************
 
 # META {
-# META   "language": "python",
-# META   "language_group": "synapse_pyspark"
+# META   "microsoft": {
+# META     "language": "python",
+# META     "language_group": "synapse_pyspark"
+# META   }
 # META }
 
 # CELL ********************
@@ -580,8 +639,10 @@ print(json.dumps({
 # METADATA ********************
 
 # META {
-# META   "language": "python",
-# META   "language_group": "synapse_pyspark"
+# META   "microsoft": {
+# META     "language": "python",
+# META     "language_group": "synapse_pyspark"
+# META   }
 # META }
 
 # CELL ********************
@@ -591,28 +652,30 @@ result_q2_fixed.explain(mode="formatted")
 # METADATA ********************
 
 # META {
-# META   "language": "python",
-# META   "language_group": "synapse_pyspark"
+# META   "microsoft": {
+# META     "language": "python",
+# META     "language_group": "synapse_pyspark"
+# META   }
 # META }
 
 # MARKDOWN ********************
 
 # ---
-# 
+#
 # # Query 3: Inventory levels by plant/line
-# 
+#
 # **Table:** `inventory_transaction` — inventory movements across production lines
-# 
+#
 # **What's wrong:** This query uses `.collect()` to pull all inventory transaction rows to the driver, then performs aggregation in Python. This defeats distributed processing and creates a bottleneck on the driver node.
-# 
+#
 # **Why it matters:**
 # - Driver memory limits can cause OOM errors on larger datasets
 # - Single-node processing wastes cluster resources
 # - Network transfer overhead for moving data to driver
 # - Does not scale as data volume grows
-# 
+#
 # **Fix:** Use distributed Spark aggregations instead of driver-side Python loops
-# 
+#
 # ---
 
 # CELL ********************
@@ -624,8 +687,10 @@ show_metrics("bronze.inventory_transaction", "baseline")
 # METADATA ********************
 
 # META {
-# META   "language": "python",
-# META   "language_group": "synapse_pyspark"
+# META   "microsoft": {
+# META     "language": "python",
+# META     "language_group": "synapse_pyspark"
+# META   }
 # META }
 
 # CELL ********************
@@ -660,8 +725,10 @@ display(result_q3)
 # METADATA ********************
 
 # META {
-# META   "language": "python",
-# META   "language_group": "synapse_pyspark"
+# META   "microsoft": {
+# META     "language": "python",
+# META     "language_group": "synapse_pyspark"
+# META   }
 # META }
 
 # CELL ********************
@@ -681,23 +748,25 @@ print(json.dumps({
 # METADATA ********************
 
 # META {
-# META   "language": "python",
-# META   "language_group": "synapse_pyspark"
+# META   "microsoft": {
+# META     "language": "python",
+# META     "language_group": "synapse_pyspark"
+# META   }
 # META }
 
 # MARKDOWN ********************
 
 # ### 🎯 Challenge: Understand why `.collect()` is an anti-pattern
-# 
+#
 # You've seen that this query collects all data to the driver and aggregates in Python.
-# 
+#
 # **Your task:** Think about:
 # 1. What happens when the table grows to millions or billions of rows?
 # 2. Why does this approach waste the distributed cluster resources?
 # 3. What are the risks of driver memory exhaustion?
-# 
+#
 # > 💡 Hint: Spark's power comes from **distributed processing**. Moving all data to a single node defeats this purpose.
-# 
+#
 # Ready to see the distributed solution? Run the cells below!
 
 # CELL ********************
@@ -732,8 +801,10 @@ display(data)
 # METADATA ********************
 
 # META {
-# META   "language": "python",
-# META   "language_group": "synapse_pyspark"
+# META   "microsoft": {
+# META     "language": "python",
+# META     "language_group": "synapse_pyspark"
+# META   }
 # META }
 
 # CELL ********************
@@ -755,28 +826,30 @@ print(json.dumps({
 # METADATA ********************
 
 # META {
-# META   "language": "python",
-# META   "language_group": "synapse_pyspark"
+# META   "microsoft": {
+# META     "language": "python",
+# META     "language_group": "synapse_pyspark"
+# META   }
 # META }
 
 # MARKDOWN ********************
 
 # ---
-# 
+#
 # # Query 4: Manufacturing event fan-out by event type
-# 
+#
 # **Table:** `manufacturing_event` — IoT telemetry with multiple joins and aggregations
-# 
+#
 # **What's wrong:** This query performs expensive joins and aggregations, then filters and collects results multiple times for different defect types. Each action triggers a complete re-scan of the source data because the expensive intermediate result is not cached.
-# 
+#
 # **Why it matters:**
 # - Repeated scans waste I/O and compute resources
 # - Each action re-executes the entire join and aggregation pipeline
 # - Multiplies query cost by the number of downstream actions
 # - Does not scale with data volume or number of output branches
-# 
+#
 # **Fix:** Cache the expensive intermediate result before branching into multiple actions
-# 
+#
 # ---
 
 # CELL ********************
@@ -788,8 +861,10 @@ show_metrics("bronze.web_order", "baseline")
 # METADATA ********************
 
 # META {
-# META   "language": "python",
-# META   "language_group": "synapse_pyspark"
+# META   "microsoft": {
+# META     "language": "python",
+# META     "language_group": "synapse_pyspark"
+# META   }
 # META }
 
 # CELL ********************
@@ -834,8 +909,10 @@ print(f"Quarantine: {len(quarantine_rows)} rows")
 # METADATA ********************
 
 # META {
-# META   "language": "python",
-# META   "language_group": "synapse_pyspark"
+# META   "microsoft": {
+# META     "language": "python",
+# META     "language_group": "synapse_pyspark"
+# META   }
 # META }
 
 # CELL ********************
@@ -863,23 +940,25 @@ print(json.dumps({
 # METADATA ********************
 
 # META {
-# META   "language": "python",
-# META   "language_group": "synapse_pyspark"
+# META   "microsoft": {
+# META     "language": "python",
+# META     "language_group": "synapse_pyspark"
+# META   }
 # META }
 
 # MARKDOWN ********************
 
 # ### 🎯 Challenge: Understand why repeated scans are inefficient
-# 
+#
 # You've seen that this query performs the same expensive operations three times.
-# 
+#
 # **Your task:** Check the Spark UI Jobs tab and think about:
 # 1. How many jobs were created? (Hint: one per `.collect()` action)
 # 2. Each job reads and processes the same source data — what's the waste?
 # 3. What happens as you add more output branches (e.g., 10 defect types instead of 3)?
-# 
+#
 # > 💡 Hint: Spark's **caching** can materialize expensive intermediate results so downstream actions reuse them instead of recomputing.
-# 
+#
 # Ready to see the cached version? Run the cells below!
 
 # CELL ********************
@@ -929,8 +1008,10 @@ print(f"Quarantine: {len(quarantine_rows_fixed)} rows")
 # METADATA ********************
 
 # META {
-# META   "language": "python",
-# META   "language_group": "synapse_pyspark"
+# META   "microsoft": {
+# META     "language": "python",
+# META     "language_group": "synapse_pyspark"
+# META   }
 # META }
 
 # CELL ********************
@@ -968,8 +1049,10 @@ print(json.dumps({
 # METADATA ********************
 
 # META {
-# META   "language": "python",
-# META   "language_group": "synapse_pyspark"
+# META   "microsoft": {
+# META     "language": "python",
+# META     "language_group": "synapse_pyspark"
+# META   }
 # META }
 
 # CELL ********************
@@ -981,28 +1064,30 @@ defect_df.explain(mode="formatted")
 # METADATA ********************
 
 # META {
-# META   "language": "python",
-# META   "language_group": "synapse_pyspark"
+# META   "microsoft": {
+# META     "language": "python",
+# META     "language_group": "synapse_pyspark"
+# META   }
 # META }
 
 # MARKDOWN ********************
 
 # ---
-# 
+#
 # # Query 5: Quality inspection pass rates
-# 
+#
 # **Tables:** `quality_inspection` and `production_order`
-# 
+#
 # **What's wrong:** This query performs a `crossJoin` without a proper join predicate between the two tables. This creates a Cartesian product where every row from one table is combined with every row from the other table, resulting in exponentially more rows than needed.
-# 
+#
 # **Why it matters:**
 # - Cartesian joins create N × M rows, which can be massive
 # - Causes extreme memory pressure and potential OOM errors
 # - Very slow execution even on small datasets
 # - Often indicates a logic bug (missing join condition)
-# 
+#
 # **Fix:** Add proper join predicate to create an equi-join
-# 
+#
 # ---
 
 # CELL ********************
@@ -1016,8 +1101,10 @@ show_metrics("bronze.web_order", "baseline")
 # METADATA ********************
 
 # META {
-# META   "language": "python",
-# META   "language_group": "synapse_pyspark"
+# META   "microsoft": {
+# META     "language": "python",
+# META     "language_group": "synapse_pyspark"
+# META   }
 # META }
 
 # CELL ********************
@@ -1058,8 +1145,10 @@ display(rows_q5)
 # METADATA ********************
 
 # META {
-# META   "language": "python",
-# META   "language_group": "synapse_pyspark"
+# META   "microsoft": {
+# META     "language": "python",
+# META     "language_group": "synapse_pyspark"
+# META   }
 # META }
 
 # CELL ********************
@@ -1085,23 +1174,25 @@ print(json.dumps({
 # METADATA ********************
 
 # META {
-# META   "language": "python",
-# META   "language_group": "synapse_pyspark"
+# META   "microsoft": {
+# META     "language": "python",
+# META     "language_group": "synapse_pyspark"
+# META   }
 # META }
 
 # MARKDOWN ********************
 
 # ### 🎯 Challenge: Identify the Cartesian join in the Spark Plan
-# 
+#
 # You've seen that this query processes way more rows than necessary.
-# 
+#
 # **Your task:** Check the Spark Plan to confirm:
 # 1. Look for `CartesianProduct` or `BroadcastNestedLoopJoin` operators
 # 2. Notice there's no join condition (no equality predicate)
 # 3. Check the Spark UI to see the massive shuffle size
-# 
+#
 # > 💡 Hint: A proper join should show `SortMergeJoin` or `BroadcastHashJoin` with an equality condition.
-# 
+#
 # Try it in the cell below!
 
 # CELL ********************
@@ -1115,8 +1206,10 @@ result_q5.explain(mode="formatted")
 # METADATA ********************
 
 # META {
-# META   "language": "python",
-# META   "language_group": "synapse_pyspark"
+# META   "microsoft": {
+# META     "language": "python",
+# META     "language_group": "synapse_pyspark"
+# META   }
 # META }
 
 # CELL ********************
@@ -1158,8 +1251,10 @@ display(rows_q5_fixed)
 # METADATA ********************
 
 # META {
-# META   "language": "python",
-# META   "language_group": "synapse_pyspark"
+# META   "microsoft": {
+# META     "language": "python",
+# META     "language_group": "synapse_pyspark"
+# META   }
 # META }
 
 # CELL ********************
@@ -1186,8 +1281,10 @@ print(json.dumps({
 # METADATA ********************
 
 # META {
-# META   "language": "python",
-# META   "language_group": "synapse_pyspark"
+# META   "microsoft": {
+# META     "language": "python",
+# META     "language_group": "synapse_pyspark"
+# META   }
 # META }
 
 # CELL ********************
@@ -1197,28 +1294,30 @@ result_q5_fixed.explain(mode="formatted")
 # METADATA ********************
 
 # META {
-# META   "language": "python",
-# META   "language_group": "synapse_pyspark"
+# META   "microsoft": {
+# META     "language": "python",
+# META     "language_group": "synapse_pyspark"
+# META   }
 # META }
 
 # MARKDOWN ********************
 
 # ---
-# 
+#
 # # Query 6: Event aggregation with unnecessary caching
-# 
+#
 # **Table:** `manufacturing_event` — IoT telemetry data
-# 
+#
 # **What's wrong:** This query performs a simple transformation and aggregation but adds unnecessary caching in the middle. Caching forces materialization and can cause the Native Execution Engine (NEE) to fall back to slower row-based processing for certain operations.
-# 
+#
 # **Why it matters:**
 # - Unnecessary cache() adds overhead without benefit
 # - Can trigger Native Execution Engine fallbacks
 # - Increases memory pressure on the cluster
 # - Caching should only be used when the same data is reused multiple times
-# 
+#
 # **Fix:** Remove unnecessary cache when data is used only once
-# 
+#
 # ---
 
 # CELL ********************
@@ -1230,8 +1329,10 @@ show_metrics("bronze.manufacturing_event", "baseline")
 # METADATA ********************
 
 # META {
-# META   "language": "python",
-# META   "language_group": "synapse_pyspark"
+# META   "microsoft": {
+# META     "language": "python",
+# META     "language_group": "synapse_pyspark"
+# META   }
 # META }
 
 # CELL ********************
@@ -1262,8 +1363,10 @@ display(rows_q6)
 # METADATA ********************
 
 # META {
-# META   "language": "python",
-# META   "language_group": "synapse_pyspark"
+# META   "microsoft": {
+# META     "language": "python",
+# META     "language_group": "synapse_pyspark"
+# META   }
 # META }
 
 # CELL ********************
@@ -1289,23 +1392,25 @@ print(json.dumps({
 # METADATA ********************
 
 # META {
-# META   "language": "python",
-# META   "language_group": "synapse_pyspark"
+# META   "microsoft": {
+# META     "language": "python",
+# META     "language_group": "synapse_pyspark"
+# META   }
 # META }
 
 # MARKDOWN ********************
 
 # ### 🎯 Challenge: Identify unnecessary cache and NEE fallback
-# 
+#
 # You've seen that caching doesn't always improve performance.
-# 
+#
 # **Your task:** Check the Spark Plan to understand:
 # 1. Look for `InMemoryTableScan` — this indicates cached data
 # 2. Look for `RowToVeloxColumnar` and `VeloxColumnarToRow` — these indicate NEE fallback
 # 3. Consider: is the cached data being reused? If not, the cache is wasteful
-# 
+#
 # > 💡 Hint: Cache is beneficial when you perform **multiple actions** on the same expensive DataFrame. For single-use, it adds overhead.
-# 
+#
 # Try it in the cell below!
 
 # CELL ********************
@@ -1319,8 +1424,10 @@ result_q6.explain(mode="formatted")
 # METADATA ********************
 
 # META {
-# META   "language": "python",
-# META   "language_group": "synapse_pyspark"
+# META   "microsoft": {
+# META     "language": "python",
+# META     "language_group": "synapse_pyspark"
+# META   }
 # META }
 
 # CELL ********************
@@ -1349,8 +1456,10 @@ display(rows_q6_fixed)
 # METADATA ********************
 
 # META {
-# META   "language": "python",
-# META   "language_group": "synapse_pyspark"
+# META   "microsoft": {
+# META     "language": "python",
+# META     "language_group": "synapse_pyspark"
+# META   }
 # META }
 
 # CELL ********************
@@ -1378,8 +1487,10 @@ print(json.dumps({
 # METADATA ********************
 
 # META {
-# META   "language": "python",
-# META   "language_group": "synapse_pyspark"
+# META   "microsoft": {
+# META     "language": "python",
+# META     "language_group": "synapse_pyspark"
+# META   }
 # META }
 
 # CELL ********************
@@ -1389,8 +1500,10 @@ result_q6_fixed.explain(mode="formatted")
 # METADATA ********************
 
 # META {
-# META   "language": "python",
-# META   "language_group": "synapse_pyspark"
+# META   "microsoft": {
+# META     "language": "python",
+# META     "language_group": "synapse_pyspark"
+# META   }
 # META }
 
 # CELL ********************
@@ -1408,6 +1521,8 @@ print_all_scenarios()
 # METADATA ********************
 
 # META {
-# META   "language": "python",
-# META   "language_group": "synapse_pyspark"
+# META   "microsoft": {
+# META     "language": "python",
+# META     "language_group": "synapse_pyspark"
+# META   }
 # META }
