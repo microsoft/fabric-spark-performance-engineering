@@ -18,20 +18,6 @@ find_replace:
     is_regex: "true"
     item_type: "Notebook" # filter on notebook files
 
-  # notebook environment GUID
-  - find_value: \#\s*META\s+"environmentId":\s*"([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})"
-    replace_value:
-      _ALL_: "$items.Environment.single_node_explore.$id" # environment GUID (dynamic)
-    is_regex: "true"
-    item_type: "Notebook" # filter on notebook files
-
-  # notebook environment workspace GUID
-  - find_value: \#\s*META\s+"workspaceId":\s*"([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})"
-    replace_value:
-      _ALL_: "$workspace.$id" # workspace ID (dynamic)
-    is_regex: "true"
-    item_type: "Notebook" # filter on notebook files
-
   # Spark Job Definition
   - find_value: \s+"defaultLakehouseArtifactId":\s*"([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})"
     replace_value:
