@@ -1,0 +1,11 @@
+{
+  "$schema": "https://developer.microsoft.com/json-schemas/fabric/gitIntegration/platformProperties/2.0.0/schema.json",
+  "metadata": {
+    "type": "Notebook",
+    "displayName": "03-optimizing-execution"
+  },
+  "config": {
+    "version": "2.0",
+    "logicalId": "9954445c-4c04-4882-a533-cca74e2d52b9"
+  }
+}

@@ -22,16 +22,7 @@ Copy, paste, and the run the below in a Notebook cell.
 
 ```python
 import fabric_jumpstart as jumpstart
-jumpstart._install_with_config(
-    logical_id="spark-performance-engineering",
-    repo_url="https://github.com/mwc360/fabric-spark-performance-workshop.git",
-    repo_ref="main",
-    entry_point="00-getting-started.Notebook",
-    items_in_scope=["Lakehouse", "Notebook", "Environment", "SparkJobDefinition"],
-    workspace_path="workspace/",              # defaults to "{logical_id}/"
-    name="Spark Performance Engineering",                         # display name (defaults to logical_id)
-    workspace_id="<guid>",                       # target workspace (auto-detected in Fabric)
-)
+jumpstart.install("spark-performance-engineering")
 ```
 
 > [!NOTE]
