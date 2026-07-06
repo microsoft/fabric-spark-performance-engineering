@@ -51,6 +51,26 @@
 # META   "language_group": "synapse_pyspark"
 # META }
 
+# MARKDOWN ********************
+
+# ## Exercise summary
+# 
+# | Exercise | Scenario | Expected performance signal |
+# |---|---|---|
+# | 1. Join strategies / broadcast | High-volume manufacturing events join to small production-order and parts references. | Results stay identical; `SortMergeJoin` becomes `BroadcastHashJoin` and shuffle/sort overhead is removed for small references. |
+# | 2. Skew handling / salting / AQE skew join | A hot customer dominates the order join key and creates straggler shuffle tasks. | Results stay identical; hot-key partition pressure is split across salt buckets, AQE skew join is enabled, and task times become more balanced. |
+# | 3. Shuffle partitions + executor spill | A KPI rollup is forced through one input partition and 4000 shuffle partitions. | Results stay identical; shuffle partitions are right-sized, AQE coalesces small outputs, and Spark UI spill/tiny-task signals are reduced or eliminated. |
+# | 4. Caching / materialization | Multiple dashboard branches repeatedly read and join the same inventory/order base. | Results stay identical; the shared joined base is materialized once and reused through cache hits instead of repeated source scans. |
+# | 5. Streaming optimizations | Hourly machine streaming aggregation is stateful without event-time cleanup. | Results stay identical for the batch proxy; streaming state is bounded by `EventTimeWatermark`, with trigger and checkpoint choices documented. |
+
+
+# METADATA ********************
+
+# META {
+# META   "language": "python",
+# META   "language_group": "synapse_pyspark"
+# META }
+
 # CELL ********************
 
 %run _benchmark_utils
@@ -169,7 +189,11 @@ print(json.dumps({"sourceMetricsSample": SOURCE_METRICS}, indent=2, sort_keys=Tr
 
 # CELL ********************
 
-# Baseline: correct result, suboptimal sort-merge execution
+# ============================================================
+# 1️⃣ BENCHMARK — Baseline sort-merge join with broadcast disabled
+# ============================================================
+
+# Baseline: correct result, suboptimal sort-merge execution.
 set_job("1 baseline sort-merge join")
 remember_conf("spark.sql.autoBroadcastJoinThreshold")
 spark.conf.set("spark.sql.autoBroadcastJoinThreshold", "-1")
@@ -184,11 +208,12 @@ q1_orders = spark.table(table_ref("production_order")).select(
     F.col("production_order.status").alias("status"),
 )
 q1_parts = spark.table(table_ref("parts")).select("part_num", "part_material", "part_cat_id")
-q1_before_df = (q1_events.join(q1_orders, "production_order_id").join(q1_parts, "part_num")
-    .groupBy("part_material").agg(F.count("*").alias("events"), F.sum("is_defect").alias("defects"), F.avg("cycle_time_ms").alias("avg_cycle_ms"))
-    .orderBy("part_material"))
-q1_before_rows = q1_before_df.benchmark("Join strategy / broadcast", "before").collect()
-display(q1_before_df)
+with benchmark_op("Join strategy / broadcast", "before", spark):
+    q1_before_df = (q1_events.join(q1_orders, "production_order_id").join(q1_parts, "part_num")
+        .groupBy("part_material").agg(F.count("*").alias("events"), F.sum("is_defect").alias("defects"), F.avg("cycle_time_ms").alias("avg_cycle_ms"))
+        .orderBy("part_material"))
+    q1_before_rows = q1_before_df.collect()
+display(spark.createDataFrame(q1_before_rows))
 
 # METADATA ********************
 
@@ -199,7 +224,11 @@ display(q1_before_df)
 
 # CELL ********************
 
-# Diagnosis: verify sort-merge and use Spark UI > SQL/DataFrame for shuffle stages
+# =================================================================================================
+# 1️⃣ DIAGNOSE — Plan proves SortMergeJoin and shuffle stages before broadcast
+# =================================================================================================
+
+# Diagnosis: verify sort-merge and use Spark UI > SQL/DataFrame for shuffle stages.
 q1_before_plan = explain_to_string(q1_before_df)
 print(q1_before_plan)
 print(json.dumps({
@@ -246,13 +275,18 @@ print(explain_to_string(q1_attempt_df)[:1200])
 
 # CELL ********************
 
-# ✅ Solution: force broadcast hash joins for small dimensions
+# ==================================================================================================
+# 1️⃣ FIX — Add broadcast hints for small references while aggregation logic stays unchanged
+# ==================================================================================================
+
+# ✅ Solution: force broadcast hash joins for small dimensions.
 set_job("1 solution broadcast join")
-q1_after_df = (q1_events.join(broadcast(q1_orders), "production_order_id").join(broadcast(q1_parts), "part_num")
-    .groupBy("part_material").agg(F.count("*").alias("events"), F.sum("is_defect").alias("defects"), F.avg("cycle_time_ms").alias("avg_cycle_ms"))
-    .orderBy("part_material"))
-q1_after_rows = q1_after_df.benchmark("Join strategy / broadcast", "after").collect()
-display(q1_after_df)
+with benchmark_op("Join strategy / broadcast", "after", spark):
+    q1_after_df = (q1_events.join(broadcast(q1_orders), "production_order_id").join(broadcast(q1_parts), "part_num")
+        .groupBy("part_material").agg(F.count("*").alias("events"), F.sum("is_defect").alias("defects"), F.avg("cycle_time_ms").alias("avg_cycle_ms"))
+        .orderBy("part_material"))
+    q1_after_rows = q1_after_df.collect()
+display(spark.createDataFrame(q1_after_rows))
 restore_conf("spark.sql.autoBroadcastJoinThreshold")
 
 # METADATA ********************
@@ -264,7 +298,11 @@ restore_conf("spark.sql.autoBroadcastJoinThreshold")
 
 # CELL ********************
 
-# Validation: same result, broadcast plan
+# ============================================================
+# 1️⃣ CHECK-CHANGES — Compare against baseline (results identical)
+# ============================================================
+
+# Validation: same result, broadcast plan.
 q1_after_plan = explain_to_string(q1_after_df)
 q1_before_map = {r["part_material"]: (r["events"], r["defects"], round(float(r["avg_cycle_ms"] or 0), 4)) for r in q1_before_rows}
 q1_after_map = {r["part_material"]: (r["events"], r["defects"], round(float(r["avg_cycle_ms"] or 0), 4)) for r in q1_after_rows}
@@ -330,6 +368,10 @@ display(q2_skewed.groupBy("customer_id").count().orderBy(F.desc("count")).limit(
 
 # CELL ********************
 
+# ============================================================
+# 2️⃣ BENCHMARK — Baseline skewed shuffle join with AQE skew handling disabled
+# ============================================================
+
 # Baseline: correct skewed join with skew handling and coalesce disabled.
 set_job("2 baseline skewed customer join")
 remember_conf("spark.sql.adaptive.skewJoin.enabled")
@@ -343,12 +385,13 @@ spark.conf.set("spark.sql.adaptive.skewJoin.enabled", "false")
 spark.conf.set("spark.sql.adaptive.coalescePartitions.enabled", "false")
 spark.conf.set("spark.sql.autoBroadcastJoinThreshold", "-1")
 spark.conf.set("spark.sql.shuffle.partitions", "200")
-q2_before_df = (q2_skewed.join(q2_customer_dim, "customer_id")
-    .groupBy("customer_id", "customer_segment")
-    .agg(F.count("*").alias("orders"), F.sum("order_total").alias("revenue"))
-    .orderBy(F.desc("orders"), "customer_id"))
-q2_before_rows = q2_before_df.benchmark("Skew handling / salting", "before").collect()
-display(q2_before_df.limit(10))
+with benchmark_op("Skew handling / salting", "before", spark):
+    q2_before_df = (q2_skewed.join(q2_customer_dim, "customer_id")
+        .groupBy("customer_id", "customer_segment")
+        .agg(F.count("*").alias("orders"), F.sum("order_total").alias("revenue"))
+        .orderBy(F.desc("orders"), "customer_id"))
+    q2_before_rows = q2_before_df.collect()
+display(spark.createDataFrame(q2_before_rows).limit(10))
 
 # METADATA ********************
 
@@ -358,6 +401,10 @@ display(q2_before_df.limit(10))
 # META }
 
 # CELL ********************
+
+# =================================================================================================
+# 2️⃣ DIAGNOSE — Hot-key counts and partition distribution prove skew-driven stragglers
+# =================================================================================================
 
 # Diagnosis: quantify hot-key skew and inspect post-shuffle partition sizes.
 q2_stats = q2_skewed.groupBy("customer_id").count().agg(F.max("count").alias("max_rows"), F.expr("percentile_approx(count, 0.5)").alias("median_rows"), F.avg("count").alias("avg_rows")).collect()[0]
@@ -408,6 +455,10 @@ display(q2_starter.groupBy("customer_id", "salt").agg(F.count("*").alias("orders
 
 # CELL ********************
 
+# ==================================================================================================
+# 2️⃣ FIX — Enable AQE skew handling and salt the hot key while rollup logic stays unchanged
+# ==================================================================================================
+
 # ✅ Solution: AQE settings plus salted join fallback.
 set_job("2 solution salted customer join")
 spark.conf.set("spark.sql.adaptive.skewJoin.enabled", "true")
@@ -416,12 +467,13 @@ spark.conf.set("spark.sql.adaptive.skewJoin.skewedPartitionThresholdInBytes", "4
 spark.conf.set("spark.sql.adaptive.advisoryPartitionSizeInBytes", "8m")
 spark.conf.set("spark.sql.autoBroadcastJoinThreshold", "-1")
 q2_dim_salted = q2_customer_dim.withColumn("salt", F.explode(F.sequence(F.lit(0), F.lit(salt_buckets - 1))))
-q2_after_df = (q2_starter.join(q2_dim_salted, ["customer_id", "salt"])
-    .groupBy("customer_id", "customer_segment")
-    .agg(F.count("*").alias("orders"), F.sum("order_total").alias("revenue"))
-    .orderBy(F.desc("orders"), "customer_id"))
-q2_after_rows = q2_after_df.benchmark("Skew handling / salting", "after").collect()
-display(q2_after_df.limit(10))
+with benchmark_op("Skew handling / salting", "after", spark):
+    q2_after_df = (q2_starter.join(q2_dim_salted, ["customer_id", "salt"])
+        .groupBy("customer_id", "customer_segment")
+        .agg(F.count("*").alias("orders"), F.sum("order_total").alias("revenue"))
+        .orderBy(F.desc("orders"), "customer_id"))
+    q2_after_rows = q2_after_df.collect()
+display(spark.createDataFrame(q2_after_rows).limit(10))
 
 # METADATA ********************
 
@@ -431,6 +483,10 @@ display(q2_after_df.limit(10))
 # META }
 
 # CELL ********************
+
+# ============================================================
+# 2️⃣ CHECK-CHANGES — Compare against baseline (results identical)
+# ============================================================
 
 # Validation: salted result equals baseline and skew was real.
 q2_before_map = {(r["customer_id"], r["customer_segment"]): (int(r["orders"]), round(float(r["revenue"] or 0), 2)) for r in q2_before_rows}
@@ -476,7 +532,11 @@ restore_conf("spark.sql.adaptive.advisoryPartitionSizeInBytes")
 
 # CELL ********************
 
-# Baseline: correct KPI query with a single input partition and 4000 shuffle partitions
+# ============================================================
+# 3️⃣ BENCHMARK — Baseline poor partition sizing with spill-prone and tiny-task signals
+# ============================================================
+
+# Baseline: correct KPI query with a single input partition and 4000 shuffle partitions.
 set_job("3 baseline poor shuffle partitioning")
 remember_conf("spark.sql.shuffle.partitions")
 remember_conf("spark.sql.adaptive.coalescePartitions.enabled")
@@ -484,11 +544,12 @@ spark.conf.set("spark.sql.shuffle.partitions", "4000")
 spark.conf.set("spark.sql.adaptive.coalescePartitions.enabled", "false")
 q3_events = spark.table(table_ref("manufacturing_event")).selectExpr("manufacturing_event.*").select("machine_id", "timestamp", "cycle_time_ms", "defect_detected")
 q3_before_input = q3_events.repartition(1)
-q3_before_df = (q3_before_input.groupBy("machine_id")
-    .agg(F.count("*").alias("events"), F.avg("cycle_time_ms").alias("avg_cycle_ms"), F.sum(F.col("defect_detected").cast("int")).alias("defects"))
-    .orderBy(F.desc("events"), "machine_id"))
-q3_before_rows = q3_before_df.benchmark("Shuffle partitions + spill", "before").collect()
-display(q3_before_df.limit(10))
+with benchmark_op("Shuffle partitions + spill", "before", spark):
+    q3_before_df = (q3_before_input.groupBy("machine_id")
+        .agg(F.count("*").alias("events"), F.avg("cycle_time_ms").alias("avg_cycle_ms"), F.sum(F.col("defect_detected").cast("int")).alias("defects"))
+        .orderBy(F.desc("events"), "machine_id"))
+    q3_before_rows = q3_before_df.collect()
+display(spark.createDataFrame(q3_before_rows).limit(10))
 
 # METADATA ********************
 
@@ -499,7 +560,11 @@ display(q3_before_df.limit(10))
 
 # CELL ********************
 
-# Diagnosis: plan, partition distribution, and Spark UI task/spill pointer
+# =================================================================================================
+# 3️⃣ DIAGNOSE — Plan, partition counts, and Spark UI spill columns prove bad sizing
+# =================================================================================================
+
+# Diagnosis: plan, partition distribution, and Spark UI task/spill pointer.
 q3_before_plan = explain_to_string(q3_before_df)
 print(q3_before_plan)
 print(json.dumps({
@@ -547,16 +612,21 @@ q3_starter_input.groupBy(spark_partition_id().alias("pid")).count().orderBy(F.de
 
 # CELL ********************
 
-# ✅ Solution: right-size shuffle partitions and let AQE coalesce tiny outputs
+# ==================================================================================================
+# 3️⃣ FIX — Repartition by machine and right-size shuffles while KPI logic stays unchanged
+# ==================================================================================================
+
+# ✅ Solution: right-size shuffle partitions and let AQE coalesce tiny outputs.
 set_job("3 solution right-sized shuffle")
 spark.conf.set("spark.sql.shuffle.partitions", str(q3_target_partitions))
 spark.conf.set("spark.sql.adaptive.coalescePartitions.enabled", "true")
 q3_after_input = q3_events.repartition(q3_target_partitions, "machine_id")
-q3_after_df = (q3_after_input.groupBy("machine_id")
-    .agg(F.count("*").alias("events"), F.avg("cycle_time_ms").alias("avg_cycle_ms"), F.sum(F.col("defect_detected").cast("int")).alias("defects"))
-    .orderBy(F.desc("events"), "machine_id"))
-q3_after_rows = q3_after_df.benchmark("Shuffle partitions + spill", "after").collect()
-display(q3_after_df.limit(10))
+with benchmark_op("Shuffle partitions + spill", "after", spark):
+    q3_after_df = (q3_after_input.groupBy("machine_id")
+        .agg(F.count("*").alias("events"), F.avg("cycle_time_ms").alias("avg_cycle_ms"), F.sum(F.col("defect_detected").cast("int")).alias("defects"))
+        .orderBy(F.desc("events"), "machine_id"))
+    q3_after_rows = q3_after_df.collect()
+display(spark.createDataFrame(q3_after_rows).limit(10))
 
 # METADATA ********************
 
@@ -567,7 +637,11 @@ display(q3_after_df.limit(10))
 
 # CELL ********************
 
-# Validation: same KPI result with healthier execution settings
+# ============================================================
+# 3️⃣ CHECK-CHANGES — Compare against baseline (results identical)
+# ============================================================
+
+# Validation: same KPI result with healthier execution settings.
 q3_before_map = {r["machine_id"]: (int(r["events"]), int(r["defects"]), round(float(r["avg_cycle_ms"] or 0), 4)) for r in q3_before_rows}
 q3_after_map = {r["machine_id"]: (int(r["events"]), int(r["defects"]), round(float(r["avg_cycle_ms"] or 0), 4)) for r in q3_after_rows}
 valid = q3_before_map == q3_after_map and spark.conf.get("spark.sql.adaptive.coalescePartitions.enabled") == "true"
@@ -607,6 +681,10 @@ restore_conf("spark.sql.adaptive.coalescePartitions.enabled")
 
 # CELL ********************
 
+# ============================================================
+# 4️⃣ BENCHMARK — Baseline repeated scans and joins across dashboard branches
+# ============================================================
+
 # Baseline: repeated reads and joins across independent actions.
 set_job("4 baseline repeated reads")
 q4_inv = spark.table(table_ref("inventory_transaction")).select(
@@ -641,6 +719,10 @@ display(spark.createDataFrame(q4_before_rows))
 # META }
 
 # CELL ********************
+
+# =================================================================================================
+# 4️⃣ DIAGNOSE — Repeated FileScan operators prove the shared base is recomputed
+# =================================================================================================
 
 # Diagnosis: repeated file scans; Spark UI Jobs tab shows one job per collect.
 q4_file_scans_before = sum(plan.count("FileScan") for plan in q4_before_plans)
@@ -689,6 +771,10 @@ print(explain_to_string(q4_candidate_base)[:1200])
 
 # CELL ********************
 
+# ==================================================================================================
+# 4️⃣ FIX — Cache and materialize the joined base once while branch logic stays unchanged
+# ==================================================================================================
+
 # ✅ Solution: cache and materialize the joined base once, then reuse it for all branches.
 set_job("4 solution cache joined base")
 q4_after_rows, q4_after_plans = [], []
@@ -714,6 +800,10 @@ q4_cached_base.unpersist()
 # META }
 
 # CELL ********************
+
+# ============================================================
+# 4️⃣ CHECK-CHANGES — Compare against baseline (results identical)
+# ============================================================
 
 # Validation: same branches and cached-scan evidence.
 def q4_signature(rows):
@@ -758,7 +848,11 @@ assert valid, "Exercise 4 validation failed"
 
 # CELL ********************
 
-# Baseline: streaming plan without watermark plus a batch proxy benchmark for the same aggregation shape
+# ============================================================
+# 5️⃣ BENCHMARK — Baseline streaming aggregation plan without watermark
+# ============================================================
+
+# Baseline: streaming plan without watermark plus a batch proxy benchmark for the same aggregation shape.
 set_job("5 baseline streaming plan")
 q5_batch = spark.table(table_ref("manufacturing_event")).select(
     F.to_timestamp(F.col("manufacturing_event.timestamp")).alias("event_ts"),
@@ -766,7 +860,9 @@ q5_batch = spark.table(table_ref("manufacturing_event")).select(
     F.col("manufacturing_event.defect_detected").cast("int").alias("is_defect"),
 )
 q5_before_batch_df = q5_batch.groupBy(F.window("event_ts", "1 hour"), "machine_id").agg(F.count("*").alias("events"), F.sum("is_defect").alias("defects"))
-q5_before_batch_rows = q5_before_batch_df.orderBy("machine_id", "window").benchmark("Streaming aggregation tuning", "before").limit(20).collect()
+with benchmark_op("Streaming aggregation tuning", "before", spark):
+    q5_before_sample_df = q5_before_batch_df.orderBy("machine_id", "window").limit(20)
+    q5_before_batch_rows = q5_before_sample_df.collect()
 q5_stream_before_df = (spark.readStream.table(table_ref("manufacturing_event"))
     .select(F.to_timestamp(F.col("manufacturing_event.timestamp")).alias("event_ts"), F.col("manufacturing_event.machine_id").alias("machine_id"), F.col("manufacturing_event.defect_detected").cast("int").alias("is_defect"))
     .groupBy(F.window("event_ts", "1 hour"), "machine_id")
@@ -783,7 +879,11 @@ print(q5_before_plan)
 
 # CELL ********************
 
-# Diagnosis: stateful streaming aggregation has no watermark
+# =================================================================================================
+# 5️⃣ DIAGNOSE — Streaming plan proves stateful aggregation has no watermark bound
+# =================================================================================================
+
+# Diagnosis: stateful streaming aggregation has no watermark.
 print(json.dumps({
     "isStreaming": q5_stream_before_df.isStreaming,
     "hasWatermark": "EventTimeWatermark" in q5_before_plan,
@@ -829,11 +929,17 @@ print(json.dumps({"watermarkDelay": q5_watermark_delay, "triggerInterval": q5_tr
 
 # CELL ********************
 
-# ✅ Solution: add watermark and state-aware settings; batch proxy result remains the same
+# ==================================================================================================
+# 5️⃣ FIX — Add event-time watermark and runtime settings while aggregation logic stays unchanged
+# ==================================================================================================
+
+# ✅ Solution: add watermark and state-aware settings; batch proxy result remains the same.
 set_job("5 solution streaming watermark")
 spark.conf.set("spark.sql.streaming.statefulOperator.checkCorrectness.enabled", "true")
 q5_after_batch_df = q5_batch.groupBy(F.window("event_ts", "1 hour"), "machine_id").agg(F.count("*").alias("events"), F.sum("is_defect").alias("defects"))
-q5_after_batch_rows = q5_after_batch_df.orderBy("machine_id", "window").benchmark("Streaming aggregation tuning", "after").limit(20).collect()
+with benchmark_op("Streaming aggregation tuning", "after", spark):
+    q5_after_sample_df = q5_after_batch_df.orderBy("machine_id", "window").limit(20)
+    q5_after_batch_rows = q5_after_sample_df.collect()
 q5_stream_after_df = (spark.readStream.table(table_ref("manufacturing_event"))
     .select(F.to_timestamp(F.col("manufacturing_event.timestamp")).alias("event_ts"), F.col("manufacturing_event.machine_id").alias("machine_id"), F.col("manufacturing_event.defect_detected").cast("int").alias("is_defect"))
     .withWatermark("event_ts", q5_watermark_delay)
@@ -852,7 +958,11 @@ print("For a real stream: .trigger(processingTime=q5_trigger_interval) and .opti
 
 # CELL ********************
 
-# Validation: streaming plan is bounded by watermark and batch proxy samples match
+# ============================================================
+# 5️⃣ CHECK-CHANGES — Compare against baseline (results identical)
+# ============================================================
+
+# Validation: streaming plan is bounded by watermark and batch proxy samples match.
 q5_before_sig = [(r["window"].start, r["window"].end, r["machine_id"], int(r["events"]), int(r["defects"] or 0)) for r in q5_before_batch_rows]
 q5_after_sig = [(r["window"].start, r["window"].end, r["machine_id"], int(r["events"]), int(r["defects"] or 0)) for r in q5_after_batch_rows]
 valid = q5_stream_before_df.isStreaming and q5_stream_after_df.isStreaming and "EventTimeWatermark" not in q5_before_plan and "EventTimeWatermark" in q5_after_plan and q5_before_sig == q5_after_sig

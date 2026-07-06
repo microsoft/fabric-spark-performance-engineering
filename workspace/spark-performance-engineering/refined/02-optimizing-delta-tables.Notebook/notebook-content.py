@@ -40,15 +40,15 @@
 # 
 # If the remedy is `OPTIMIZE`, clustering, schema/data-type cleanup, partition design, deletion vectors, or Delta table properties, it belongs here. If the remedy changes query code, joins, caching, or AQE, it belongs in a later module.
 # 
-# | # | Exercise | Table-layer fix |
-# |---|----------|-----------------|
-# | 1 | OPTIMIZE / compaction | Compact tiny files |
-# | 2 | Optimize Write | Prevent future tiny files |
-# | 3 | Liquid clustering + data-skipping stats | Reorder data at rest for file pruning |
-# | 4 | Deletion vectors | Avoid full file rewrites for DML |
-# | 5 | Data-type optimization | Store numeric IDs as numeric types |
-# | 6 | Partitioning strategy | Choose partitions that prune without creating small files |
-# | 7 | Delta storage-regression audit | Find property drift and remediate layout regressions |
+# | Exercise | Scenario | Expected performance signal |
+# |---|---|---|
+# | 1. OPTIMIZE / compaction | Compact deliberately tiny `manufacturing_event_tiny` files. | File count drops from many to few, average file size increases, same aggregate scan runs faster. |
+# | 2. Optimize Write | Append the same `inventory_transaction` batch before and after table Optimize Write / Auto Compact properties. | No small-file accumulation after repeated writes; new files created per append stays low. |
+# | 3. Liquid clustering + data-skipping stats | Cluster `inventory_transaction_clustered` by `color_id` and collect stats for selective filters. | Files skipped via clustering, fewer input files read, less data scanned for the same `color_id` filter. |
+# | 4. Deletion vectors | Delete small row sets from matched `web_order_line` tables with DVs off vs on. | DELETE avoids full-file rewrite where supported; history shows fewer removed / rewritten files. |
+# | 5. Data-type optimization | Rewrite `inventory_transaction` with numeric `color_id` stored as `int` instead of `string`. | Table size decreases after right-sizing types; numeric stats support cleaner filtered scans. |
+# | 6. Partitioning strategy | Compare no partitioning, high-cardinality `part_num`, and date partitioning. | Avoid over-partitioning; balanced file sizes and input-file counts align with time-range and point filters. |
+# | 7. Delta storage-regression audit | Use history and properties to find an append that regressed `inventory_transaction_audit` layout. | Isolate the commit/version that regressed file layout via `DESCRIBE HISTORY`, then verify file count and pruning recover. |
 
 # METADATA ********************
 
@@ -156,7 +156,9 @@ print("\n✅ Module copies are ready. All exercises mutate opt_tables only.")
 
 # CELL ********************
 
-# 1️⃣ Baseline — create a deliberately tiny-file table and measure it
+# ============================================================
+# 1️⃣ BENCHMARK — Create a tiny-file baseline and time the aggregate scan
+# ============================================================
 EX1_TABLE = f"{WORK_SCHEMA}.manufacturing_event_tiny"
 
 spark.sql(f"DROP TABLE IF EXISTS {EX1_TABLE}")
@@ -171,12 +173,19 @@ spark.sql(f"DROP TABLE IF EXISTS {EX1_TABLE}")
 
 metrics_1_before = show_metrics(EX1_TABLE, "before OPTIMIZE")
 
-spark.sql(f"""
-    SELECT part_num, SUM(cycle_time_ms) AS total_cycle_time
-    FROM {EX1_TABLE}
-    GROUP BY part_num
-""").benchmark("Ex1 OPTIMIZE compaction", "before").collect()
+# NOTE: The terminal collect() stays inside the timed block.
+with benchmark_op("Ex1 OPTIMIZE compaction", "before", spark):
+    spark.sql(f"""
+        SELECT part_num, SUM(cycle_time_ms) AS total_cycle_time
+        FROM {EX1_TABLE}
+        GROUP BY part_num
+    """).collect()
 
+# =================================================================================================
+# 1️⃣ DIAGNOSE — DESCRIBE DETAIL proves the baseline has many tiny files
+# =================================================================================================
+
+# NOTE: numFiles and sizeInBytes are the physical layout evidence for compaction.
 display(spark.sql(f"DESCRIBE DETAIL {EX1_TABLE}").select("format", "numFiles", "sizeInBytes"))
 
 # METADATA ********************
@@ -215,7 +224,11 @@ show_metrics(EX1_TABLE, "current")
 
 # CELL ********************
 
-# ✅ Solution — apply the physical table fix
+# ==================================================================================================
+# 1️⃣ FIX — Apply OPTIMIZE to compact tiny Delta files
+# ==================================================================================================
+
+# NOTE: OPTIMIZE is the table-layer fix; the query code is unchanged.
 with benchmark_op("Ex1 OPTIMIZE operation", "OPTIMIZE", spark):
     optimize_result_1 = spark.sql(f"OPTIMIZE {EX1_TABLE}")
 
@@ -231,12 +244,17 @@ metrics_1_after = show_metrics(EX1_TABLE, "after OPTIMIZE")
 
 # CELL ********************
 
-# 1️⃣ Validation — same query, same code, better table layout
-spark.sql(f"""
-    SELECT part_num, SUM(cycle_time_ms) AS total_cycle_time
-    FROM {EX1_TABLE}
-    GROUP BY part_num
-""").benchmark("Ex1 OPTIMIZE compaction", "after").collect()
+# ============================================================
+# 1️⃣ CHECK-CHANGES — Compare against baseline
+# ============================================================
+
+# NOTE: Run the same aggregate after compaction to compare query timing and layout.
+with benchmark_op("Ex1 OPTIMIZE compaction", "after", spark):
+    spark.sql(f"""
+        SELECT part_num, SUM(cycle_time_ms) AS total_cycle_time
+        FROM {EX1_TABLE}
+        GROUP BY part_num
+    """).collect()
 
 print(f"Files before: {metrics_1_before['num_files']:,}")
 print(f"Files after:  {metrics_1_after['num_files']:,}")
@@ -271,7 +289,11 @@ print(f"Average file after:  {metrics_1_after['avg_file_kb']:,.1f} KB")
 
 # CELL ********************
 
-# 2️⃣ Baseline — append a small batch without Optimize Write
+# ============================================================
+# 2️⃣ BENCHMARK — Append a small batch with Optimize Write disabled
+# ============================================================
+
+# NOTE: This creates a controlled small-file baseline for the append pattern.
 EX2_TABLE = f"{WORK_SCHEMA}.inventory_transaction_ow"
 BATCH_ROWS = 5000
 
@@ -294,6 +316,11 @@ with benchmark_op("Ex2 Optimize Write append", "without optimizeWrite", spark):
 files_after_bad = get_table_metrics(EX2_TABLE)["num_files"]
 new_files_without_ow = files_after_bad - files_before_bad
 
+# =================================================================================================
+# 2️⃣ DIAGNOSE — File deltas prove the append created small-file accumulation
+# =================================================================================================
+
+# NOTE: A high new_files_without_ow value means each append can undo prior compaction.
 print(f"Files before append: {files_before_bad:,}")
 print(f"Files after append:  {files_after_bad:,}")
 print(f"New files created without Optimize Write: {new_files_without_ow:,}")
@@ -334,7 +361,11 @@ display(spark.sql(f"SHOW TBLPROPERTIES {EX2_TABLE}").filter("key LIKE 'delta.aut
 
 # CELL ********************
 
-# ✅ Solution — prevent future small files on this table
+# ==================================================================================================
+# 2️⃣ FIX — Enable Optimize Write and Auto Compact table properties
+# ==================================================================================================
+
+# NOTE: These Delta properties change future write layout without changing readers.
 spark.sql(f"OPTIMIZE {EX2_TABLE}")
 spark.sql(f"""
     ALTER TABLE {EX2_TABLE} SET TBLPROPERTIES (
@@ -354,7 +385,11 @@ display(spark.sql(f"SHOW TBLPROPERTIES {EX2_TABLE}").filter("key LIKE 'delta.aut
 
 # CELL ********************
 
-# 2️⃣ Validation — same append shape after Optimize Write is enabled
+# ============================================================
+# 2️⃣ CHECK-CHANGES — Compare against baseline
+# ============================================================
+
+# NOTE: Repeat the same append shape so only the table properties changed.
 files_before_good = get_table_metrics(EX2_TABLE)["num_files"]
 good_batch = spark.table(f"{WORK_SCHEMA}.inventory_transaction").limit(BATCH_ROWS).repartition(8)
 
@@ -398,7 +433,11 @@ show_metrics(EX2_TABLE, "after optimized append")
 
 # CELL ********************
 
-# 3️⃣ Baseline — compact but unclustered selective scan
+# ============================================================
+# 3️⃣ BENCHMARK — Time a selective scan before clustering
+# ============================================================
+
+# NOTE: The table is compacted but values are not colocated for data skipping yet.
 EX3_TABLE = f"{WORK_SCHEMA}.inventory_transaction_clustered"
 
 spark.sql(f"DROP TABLE IF EXISTS {EX3_TABLE}")
@@ -429,8 +468,14 @@ query_3_before = spark.sql(f"""
     GROUP BY transaction_type
 """)
 
-query_3_before.benchmark("Ex3 Liquid clustering", "before").collect()
+with benchmark_op("Ex3 Liquid clustering", "before", spark):
+    query_3_before.collect()
 
+# =================================================================================================
+# 3️⃣ DIAGNOSE — Input-file count proves clustering has not yet helped file pruning
+# =================================================================================================
+
+# NOTE: The same filter should touch fewer files after clustering and stats collection.
 files_3_before = len(query_3_before.inputFiles())
 print(f"Files referenced before clustering: {files_3_before:,}")
 
@@ -473,7 +518,11 @@ display(spark.sql(f"SHOW TBLPROPERTIES {EX3_TABLE}").filter("key LIKE 'delta.dat
 
 # CELL ********************
 
-# ✅ Solution — enable stats, cluster the data at rest, and expose quality metrics
+# ==================================================================================================
+# 3️⃣ FIX — Enable data-skipping stats, liquid cluster by color_id, and OPTIMIZE FULL
+# ==================================================================================================
+
+# NOTE: Stats define what Delta can skip; clustering colocates similar values at rest.
 spark.sql(f"""
     ALTER TABLE {EX3_TABLE} SET TBLPROPERTIES (
       'delta.dataSkippingStatsColumns' = 'color_id,transaction_type,quantity'
@@ -508,7 +557,11 @@ metrics_3_after = show_metrics(EX3_TABLE, "after clustering")
 
 # CELL ********************
 
-# 3️⃣ Validation — same filter after clustering
+# ============================================================
+# 3️⃣ CHECK-CHANGES — Compare against baseline
+# ============================================================
+
+# NOTE: Run the identical filter after clustering to compare input files and timing.
 query_3_after = spark.sql(f"""
     SELECT transaction_type, COUNT(*) AS cnt, SUM(quantity) AS total_qty
     FROM {EX3_TABLE}
@@ -516,7 +569,8 @@ query_3_after = spark.sql(f"""
     GROUP BY transaction_type
 """)
 
-query_3_after.benchmark("Ex3 Liquid clustering", "after").collect()
+with benchmark_op("Ex3 Liquid clustering", "after", spark):
+    query_3_after.collect()
 
 files_3_after = len(query_3_after.inputFiles())
 print(f"Filter value: color_id = {sample_color}")
@@ -552,7 +606,11 @@ print("Open the Spark UI SQL scan node to confirm file pruning and data-skipping
 
 # CELL ********************
 
-# 4️⃣ Baseline — prepare two identical tables for DML comparison
+# ============================================================
+# 4️⃣ BENCHMARK — Prepare matched tables for delete timing with DVs off and on
+# ============================================================
+
+# NOTE: Both tables start from the same data and are optimized before DML.
 EX4_NO_DV = f"{WORK_SCHEMA}.web_order_line_no_dv"
 EX4_WITH_DV = f"{WORK_SCHEMA}.web_order_line_with_dv"
 
@@ -577,6 +635,11 @@ candidate_sets = spark.sql(f"""
 set_a, count_a = candidate_sets[0]["set_num"], candidate_sets[0]["cnt"]
 set_b, count_b = candidate_sets[1]["set_num"], candidate_sets[1]["cnt"]
 
+# =================================================================================================
+# 4️⃣ DIAGNOSE — Table properties and history metrics will prove the physical DML pattern
+# =================================================================================================
+
+# NOTE: Compare operationMetrics, especially removed files, not just elapsed time.
 show_metrics(EX4_NO_DV, "without DVs")
 show_metrics(EX4_WITH_DV, "with DVs")
 print(f"Delete target without DVs: set_num={set_a}, rows={count_a:,}")
@@ -618,7 +681,11 @@ display(spark.sql(f"SHOW TBLPROPERTIES {EX4_WITH_DV}").filter("key LIKE '%Deleti
 
 # CELL ********************
 
-# ✅ Solution — compare delete behavior with and without deletion vectors
+# ==================================================================================================
+# 4️⃣ FIX — Enable deletion-vector behavior and execute comparable DELETE operations
+# ==================================================================================================
+
+# NOTE: The timed DELETE statements are inside the benchmark blocks.
 with benchmark_op("Ex4 Deletion vectors", "without DVs", spark):
     spark.sql(f"DELETE FROM {EX4_NO_DV} WHERE set_num = '{set_a}'")
 
@@ -644,7 +711,11 @@ print(f"With DVs removed files: {metrics_with_dv.get('numRemovedFiles', 'n/a')}"
 
 # CELL ********************
 
-# 4️⃣ Validation — both deletes removed rows; the physical write pattern differs
+# ============================================================
+# 4️⃣ CHECK-CHANGES — Compare against baseline
+# ============================================================
+
+# NOTE: Validate logical row removal and compare the resulting table metrics.
 remaining_no_dv = spark.table(EX4_NO_DV).filter(F.col("set_num") == set_a).count()
 remaining_with_dv = spark.table(EX4_WITH_DV).filter(F.col("set_num") == set_b).count()
 
@@ -681,7 +752,11 @@ show_metrics(EX4_WITH_DV, "after delete with DVs")
 
 # CELL ********************
 
-# 5️⃣ Baseline — create a table with color_id stored as string
+# ============================================================
+# 5️⃣ BENCHMARK — Time a filtered scan with color_id stored as string
+# ============================================================
+
+# NOTE: This intentionally stores a numeric identifier as text to show storage overhead.
 EX5_BAD = f"{WORK_SCHEMA}.inventory_transaction_color_string"
 EX5_GOOD = f"{WORK_SCHEMA}.inventory_transaction_color_int"
 
@@ -706,13 +781,19 @@ sample_color_text = spark.sql(f"""
     LIMIT 1
 """).collect()[0]["color_id"]
 
-spark.sql(f"""
-    SELECT color_id, SUM(quantity) AS total_qty
-    FROM {EX5_BAD}
-    WHERE color_id = '{sample_color_text}'
-    GROUP BY color_id
-""").benchmark("Ex5 Data type", "string color_id").collect()
+with benchmark_op("Ex5 Data type", "string color_id", spark):
+    spark.sql(f"""
+        SELECT color_id, SUM(quantity) AS total_qty
+        FROM {EX5_BAD}
+        WHERE color_id = '{sample_color_text}'
+        GROUP BY color_id
+    """).collect()
 
+# =================================================================================================
+# 5️⃣ DIAGNOSE — DESCRIBE DETAIL and schema prove string IDs use unnecessary storage
+# =================================================================================================
+
+# NOTE: sizeInBytes is the baseline to compare after right-sizing color_id.
 display(spark.sql(f"DESCRIBE DETAIL {EX5_BAD}").select("numFiles", "sizeInBytes"))
 
 # METADATA ********************
@@ -751,7 +832,11 @@ print(f"Convert color_id from string to int in: {EX5_GOOD}")
 
 # CELL ********************
 
-# ✅ Solution — rewrite the table with the correct numeric type
+# ==================================================================================================
+# 5️⃣ FIX — Rewrite color_id as an int and optimize the corrected table
+# ==================================================================================================
+
+# NOTE: This changes schema at rest while preserving the logical query.
 corrected_df = spark.table(EX5_BAD).withColumn("color_id", F.col("color_id").cast("int"))
 corrected_df.repartition(64).write.format("delta").mode("overwrite").saveAsTable(EX5_GOOD)
 spark.sql(f"OPTIMIZE {EX5_GOOD}")
@@ -767,15 +852,20 @@ spark.table(EX5_GOOD).printSchema()
 
 # CELL ********************
 
-# 5️⃣ Validation — compare storage size and filtered scan
+# ============================================================
+# 5️⃣ CHECK-CHANGES — Compare against baseline
+# ============================================================
+
+# NOTE: Use the same filter value, cast to int, to compare type-correct storage.
 sample_color_int = int(sample_color_text)
 
-spark.sql(f"""
-    SELECT color_id, SUM(quantity) AS total_qty
-    FROM {EX5_GOOD}
-    WHERE color_id = {sample_color_int}
-    GROUP BY color_id
-""").benchmark("Ex5 Data type", "int color_id").collect()
+with benchmark_op("Ex5 Data type", "int color_id", spark):
+    spark.sql(f"""
+        SELECT color_id, SUM(quantity) AS total_qty
+        FROM {EX5_GOOD}
+        WHERE color_id = {sample_color_int}
+        GROUP BY color_id
+    """).collect()
 
 print(f"Size with string color_id: {metrics_5_before['size_mb']:.2f} MB")
 print(f"Size with int color_id:    {metrics_5_after['size_mb']:.2f} MB")
@@ -809,7 +899,11 @@ print("Numeric columns also produce numeric min/max statistics for safer filteri
 
 # CELL ********************
 
-# 6️⃣ Baseline — write three layouts from the same rows
+# ============================================================
+# 6️⃣ BENCHMARK — Build three partition layouts from the same rows
+# ============================================================
+
+# NOTE: The benchmark matrix later uses identical filters across all three layouts.
 EX6_NONE = f"{WORK_SCHEMA}.mfg_no_partition"
 EX6_HIGH = f"{WORK_SCHEMA}.mfg_partition_part_num"
 EX6_DATE = f"{WORK_SCHEMA}.mfg_partition_event_date"
@@ -826,6 +920,11 @@ partition_df.repartition(64).write.format("delta").mode("overwrite").saveAsTable
 partition_df.write.format("delta").mode("overwrite").partitionBy("part_num").saveAsTable(EX6_HIGH)
 partition_df.write.format("delta").mode("overwrite").partitionBy("event_date").saveAsTable(EX6_DATE)
 
+# =================================================================================================
+# 6️⃣ DIAGNOSE — File counts and partition columns prove which layouts risk over-partitioning
+# =================================================================================================
+
+# NOTE: Compare num_files and avg_file_kb before judging any query timing.
 metrics_6_none = show_metrics(EX6_NONE, "no partition")
 metrics_6_high = show_metrics(EX6_HIGH, "partitionBy part_num")
 metrics_6_date = show_metrics(EX6_DATE, "partitionBy event_date")
@@ -887,7 +986,11 @@ display(spark.sql(f"DESCRIBE DETAIL {TABLE_UNDER_TEST}").select("numFiles", "par
 
 # CELL ********************
 
-# ✅ Solution — run the comparison matrix
+# ==================================================================================================
+# 6️⃣ FIX — Compare no partition, high-cardinality partition, and date partition layouts
+# ==================================================================================================
+
+# NOTE: Partitioning is the table-layer design choice under test.
 partition_results = []
 
 for label, table in [
@@ -901,7 +1004,8 @@ for label, table in [
         WHERE event_date = DATE '{sample_date}'
         GROUP BY machine_id
     """)
-    time_query.benchmark("Ex6 Partition time-range", label).collect()
+    with benchmark_op("Ex6 Partition time-range", label, spark):
+        time_query.collect()
 
     point_query = spark.sql(f"""
         SELECT color_id, COUNT(*) AS events
@@ -909,7 +1013,8 @@ for label, table in [
         WHERE part_num = '{sample_part}'
         GROUP BY color_id
     """)
-    point_query.benchmark("Ex6 Partition point", label).collect()
+    with benchmark_op("Ex6 Partition point", label, spark):
+        point_query.collect()
 
     metrics = get_table_metrics(table)
     partition_results.append((label, table, metrics["num_files"], metrics["avg_file_kb"], len(time_query.inputFiles()), len(point_query.inputFiles())))
@@ -929,7 +1034,11 @@ display(partition_summary_df)
 
 # CELL ********************
 
-# 6️⃣ Validation — read the physical evidence
+# ============================================================
+# 6️⃣ CHECK-CHANGES — Compare against baseline
+# ============================================================
+
+# NOTE: The summary ties query input-file counts back to physical partition layout.
 print("Partitioning takeaways:")
 print("1. Date partitioning should help date filters when each date partition has enough data.")
 print("2. High-cardinality partitioning can explode file counts and hurt broad scans.")
@@ -966,7 +1075,11 @@ display(spark.sql(f"DESCRIBE DETAIL {EX6_DATE}").select("partitionColumns", "num
 
 # CELL ********************
 
-# 7️⃣ Baseline — create a healthy clustered table, then introduce regression
+# ============================================================
+# 7️⃣ BENCHMARK — Capture healthy scan timing, then introduce a small-file regression
+# ============================================================
+
+# NOTE: Start from a healthy optimized and clustered table before simulating drift.
 EX7_TABLE = f"{WORK_SCHEMA}.inventory_transaction_audit"
 
 spark.sql(f"DROP TABLE IF EXISTS {EX7_TABLE}")
@@ -992,7 +1105,8 @@ sample_audit_color = spark.sql(f"""
 """).collect()[0]["color_id"]
 
 healthy_query = spark.sql(f"SELECT * FROM {EX7_TABLE} WHERE color_id = {sample_audit_color}")
-healthy_query.benchmark("Ex7 Storage regression", "healthy").count()
+with benchmark_op("Ex7 Storage regression", "healthy", spark):
+    healthy_query.count()
 healthy_input_files = len(healthy_query.inputFiles())
 
 spark.sql(f"""
@@ -1006,6 +1120,11 @@ regression_batch = spark.table(f"{WORK_SCHEMA}.inventory_transaction").limit(200
 with benchmark_op("Ex7 Regression append", "bad append", spark):
     regression_batch.write.format("delta").mode("append").saveAsTable(EX7_TABLE)
 
+# =================================================================================================
+# 7️⃣ DIAGNOSE — DESCRIBE HISTORY and properties identify the layout regression
+# =================================================================================================
+
+# NOTE: The bad append and disabled properties are the incident evidence to audit.
 metrics_7_regressed = show_metrics(EX7_TABLE, "after regression")
 
 # METADATA ********************
@@ -1046,7 +1165,11 @@ display(spark.sql(f"SHOW TBLPROPERTIES {EX7_TABLE}").filter("key LIKE 'delta.aut
 
 # CELL ********************
 
-# ✅ Solution — isolate the offending operation and restore table properties
+# ==================================================================================================
+# 7️⃣ FIX — Restore optimization properties and run OPTIMIZE FULL
+# ==================================================================================================
+
+# NOTE: History isolates the offending operation; properties and OPTIMIZE remediate it.
 history_df = spark.sql(f"DESCRIBE HISTORY {EX7_TABLE}")
 
 audit_df = (
@@ -1089,9 +1212,14 @@ metrics_7_remediated = show_metrics(EX7_TABLE, "after remediation")
 
 # CELL ********************
 
-# 7️⃣ Validation — query pruning/scan behavior after remediation
+# ============================================================
+# 7️⃣ CHECK-CHANGES — Compare against baseline
+# ============================================================
+
+# NOTE: Re-run the same color_id filter to verify pruning and file layout recovered.
 remediated_query = spark.sql(f"SELECT * FROM {EX7_TABLE} WHERE color_id = {sample_audit_color}")
-remediated_query.benchmark("Ex7 Storage regression", "remediated").count()
+with benchmark_op("Ex7 Storage regression", "remediated", spark):
+    remediated_query.count()
 remediated_input_files = len(remediated_query.inputFiles())
 
 print(f"Healthy input files for color_id={sample_audit_color}: {healthy_input_files:,}")

@@ -43,6 +43,24 @@
 # META   "language_group": "synapse_pyspark"
 # META }
 
+# MARKDOWN ********************
+
+# ## Exercise summary
+# 
+# | Exercise | Scenario | Expected performance signal |
+# |---|---|---|
+# | 1 — Predicate pushdown | A daily defect-rate dashboard derives a string day before filtering `manufacturing_event`. | Fewer files read / filter pushed to FileScan; substring disappears from the filter path. |
+# | 2 — Python UDFs → native expressions / NEE | A top-customer query calculates line totals and order days with Python UDFs. | No `BatchEvalPython` / Python boundary removed; NEE fallback blocks drop to 0. |
+# | 3 — Driver `collect()` / `toPandas()` and driver OOM | An inventory workflow collects raw transactions to the driver and aggregates in Python. | Driver result size shrinks / raw-row collect avoided; no OOM risk from full-result transfer. |
+# | 4 — Cartesian / missing join key | A pass-rate query omits the production-order join key, and a cycle-time variant uses an inequality self-join. | `CartesianProduct` / nested-loop work replaced by equi-join or window logic; runtime and pair counts drop. |
+
+# METADATA ********************
+
+# META {
+# META   "language": "python",
+# META   "language_group": "synapse_pyspark"
+# META }
+
 # CELL ********************
 
 %run _benchmark_utils
@@ -210,28 +228,47 @@ print(json.dumps(recent_history("manufacturing_event"), default=str, indent=2))
 
 # CELL ********************
 
-# BENCHMARK / DIAGNOSE: string timestamp handling weakens pushdown
+# ============================================================
+# 1️⃣ BENCHMARK — Capture baseline query time
+# ============================================================
+
+# The baseline derives a string day before filtering, which weakens pushdown.
 print("🐌 Running baseline predicate-pushdown query...\n")
 
 mfg = spark.table(table_ref("manufacturing_event")).selectExpr("manufacturing_event.*")
 latest_day = mfg.select(F.max(F.to_date("timestamp")).alias("d")).collect()[0]["d"]
 
-result_predicate_before = (
-    mfg
-    .withColumn("event_day", F.substring(F.col("timestamp"), 1, 10))
-    .filter(F.col("event_day") == F.lit(str(latest_day)))
-    .groupBy("event_day", F.col("machine_id"))
-    .agg(
-        F.count("*").alias("events"),
-        F.sum(F.col("defect_detected").cast("int")).alias("defects"),
-        (F.sum(F.col("defect_detected").cast("int")) / F.count("*")).alias("defect_rate"),
+with benchmark_op("Predicate Pushdown", "before", spark):
+    result_predicate_before = (
+        mfg
+        .withColumn("event_day", F.substring(F.col("timestamp"), 1, 10))
+        .filter(F.col("event_day") == F.lit(str(latest_day)))
+        .groupBy("event_day", F.col("machine_id"))
+        .agg(
+            F.count("*").alias("events"),
+            F.sum(F.col("defect_detected").cast("int")).alias("defects"),
+            (F.sum(F.col("defect_detected").cast("int")) / F.count("*")).alias("defect_rate"),
+        )
+        .orderBy(F.desc("defect_rate"))
     )
-    .orderBy(F.desc("defect_rate"))
-    .benchmark("Predicate Pushdown", "before")
-)
-predicate_before_pdf = result_predicate_before.toPandas()
+    predicate_before_pdf = result_predicate_before.toPandas()
+
 display(predicate_before_pdf)
 
+# METADATA ********************
+
+# META {
+# META   "language": "python",
+# META   "language_group": "synapse_pyspark"
+# META }
+
+# CELL ********************
+
+# =================================================================================================
+# 1️⃣ DIAGNOSE — Prove the root cause is weak file pruning and missing pushdown
+# =================================================================================================
+
+# Capture the FileScan filters and read-file count that explain the slow baseline.
 predicate_before_scan = scan_filters(result_predicate_before)
 predicate_before_evidence = {
     "antiPattern": "String timestamp transformation before filtering",
@@ -283,23 +320,28 @@ display(starter_predicate_filter.select("timestamp", "machine_id", "defect_detec
 
 # CELL ********************
 
-# ✅ Solution: filter with native column functions before aggregating
+# ==================================================================================================
+# 1️⃣ FIX — Filter with native column functions before aggregating
+# ==================================================================================================
+
+# The fixed query applies the date predicate before deriving presentation columns.
 print("✅ Running fixed predicate-pushdown query...\n")
 
-result_predicate_after = (
-    mfg
-    .filter(F.to_date("timestamp") == F.lit(latest_day))
-    .withColumn("event_day", F.to_date("timestamp"))
-    .groupBy("event_day", F.col("machine_id"))
-    .agg(
-        F.count("*").alias("events"),
-        F.sum(F.col("defect_detected").cast("int")).alias("defects"),
-        (F.sum(F.col("defect_detected").cast("int")) / F.count("*")).alias("defect_rate"),
+with benchmark_op("Predicate Pushdown", "after", spark):
+    result_predicate_after = (
+        mfg
+        .filter(F.to_date("timestamp") == F.lit(latest_day))
+        .withColumn("event_day", F.to_date("timestamp"))
+        .groupBy("event_day", F.col("machine_id"))
+        .agg(
+            F.count("*").alias("events"),
+            F.sum(F.col("defect_detected").cast("int")).alias("defects"),
+            (F.sum(F.col("defect_detected").cast("int")) / F.count("*")).alias("defect_rate"),
+        )
+        .orderBy(F.desc("defect_rate"))
     )
-    .orderBy(F.desc("defect_rate"))
-    .benchmark("Predicate Pushdown", "after")
-)
-predicate_after_pdf = result_predicate_after.toPandas()
+    predicate_after_pdf = result_predicate_after.toPandas()
+
 display(predicate_after_pdf)
 
 # METADATA ********************
@@ -311,7 +353,11 @@ display(predicate_after_pdf)
 
 # CELL ********************
 
-# Validation: benchmark comparison auto-printed; verify the fixed plan signals.
+# ============================================================
+# 1️⃣ CHECK-CHANGES — Compare against baseline
+# ============================================================
+
+# Verify the fixed plan signals and record the before/after evidence.
 predicate_after_scan = scan_filters(result_predicate_after)
 predicate_after_evidence = {
     "antiPattern": "String timestamp transformation before filtering",
@@ -352,7 +398,11 @@ result_predicate_after.explain(mode="formatted")
 
 # CELL ********************
 
-# BENCHMARK / DIAGNOSE: Python UDFs add serialization and NEE fallback risk.
+# ============================================================
+# 2️⃣ BENCHMARK — Capture baseline query time
+# ============================================================
+
+# The baseline uses Python UDFs, adding a JVM↔Python boundary to the plan.
 print("🐌 Running baseline query with Python UDFs...\n")
 
 @F.udf(DoubleType())
@@ -379,21 +429,36 @@ exploded_orders = orders.select(
     F.explode("order_lines").alias("line"),
 )
 
-result_udf_before = (
-    exploded_orders
-    .withColumn("line_total", python_line_total("line.quantity", "line.unit_price", "line.extended_price"))
-    .withColumn("order_day", python_extract_day("order_date"))
-    .groupBy("customer_id", "order_day")
-    .agg(F.sum("line_total").alias("total_spend"), F.count("*").alias("line_count"))
-    .groupBy("customer_id")
-    .agg(F.sum("total_spend").alias("total_spend"), F.sum("line_count").alias("line_count"))
-    .orderBy(F.desc("total_spend"))
-    .limit(10)
-    .benchmark("Python UDF Overhead", "before")
-)
-udf_before_pdf = result_udf_before.toPandas()
+with benchmark_op("Python UDF Overhead", "before", spark):
+    result_udf_before = (
+        exploded_orders
+        .withColumn("line_total", python_line_total("line.quantity", "line.unit_price", "line.extended_price"))
+        .withColumn("order_day", python_extract_day("order_date"))
+        .groupBy("customer_id", "order_day")
+        .agg(F.sum("line_total").alias("total_spend"), F.count("*").alias("line_count"))
+        .groupBy("customer_id")
+        .agg(F.sum("total_spend").alias("total_spend"), F.sum("line_count").alias("line_count"))
+        .orderBy(F.desc("total_spend"))
+        .limit(10)
+    )
+    udf_before_pdf = result_udf_before.toPandas()
+
 display(udf_before_pdf)
 
+# METADATA ********************
+
+# META {
+# META   "language": "python",
+# META   "language_group": "synapse_pyspark"
+# META }
+
+# CELL ********************
+
+# =================================================================================================
+# 2️⃣ DIAGNOSE — Prove the root cause is Python execution and NEE fallback risk
+# =================================================================================================
+
+# Look for BatchEvalPython/PythonUDF nodes and any Velox fallback blocks.
 udf_before_plan = plan_string(result_udf_before)
 udf_before_fallbacks = extract_nee_fallbacks(udf_before_plan)
 udf_before_evidence = {
@@ -451,7 +516,11 @@ display(starter_native_columns)
 
 # CELL ********************
 
-# ✅ Solution: replace Python UDFs with native Spark SQL expressions.
+# ==================================================================================================
+# 2️⃣ FIX — Replace Python UDFs with native Spark SQL expressions
+# ==================================================================================================
+
+# Native expressions keep execution inside Spark and avoid the Python boundary.
 print("✅ Running fixed query with native expressions...\n")
 
 line_total_col = F.coalesce(
@@ -461,19 +530,20 @@ line_total_col = F.coalesce(
 )
 order_day_col = F.regexp_extract("order_date", r"(\d{4}-\d{2}-\d{2})", 1)
 
-result_udf_after = (
-    exploded_orders
-    .withColumn("line_total", line_total_col)
-    .withColumn("order_day", order_day_col)
-    .groupBy("customer_id", "order_day")
-    .agg(F.sum("line_total").alias("total_spend"), F.count("*").alias("line_count"))
-    .groupBy("customer_id")
-    .agg(F.sum("total_spend").alias("total_spend"), F.sum("line_count").alias("line_count"))
-    .orderBy(F.desc("total_spend"))
-    .limit(10)
-    .benchmark("Python UDF Overhead", "after")
-)
-udf_after_pdf = result_udf_after.toPandas()
+with benchmark_op("Python UDF Overhead", "after", spark):
+    result_udf_after = (
+        exploded_orders
+        .withColumn("line_total", line_total_col)
+        .withColumn("order_day", order_day_col)
+        .groupBy("customer_id", "order_day")
+        .agg(F.sum("line_total").alias("total_spend"), F.count("*").alias("line_count"))
+        .groupBy("customer_id")
+        .agg(F.sum("total_spend").alias("total_spend"), F.sum("line_count").alias("line_count"))
+        .orderBy(F.desc("total_spend"))
+        .limit(10)
+    )
+    udf_after_pdf = result_udf_after.toPandas()
+
 display(udf_after_pdf)
 
 # METADATA ********************
@@ -485,7 +555,11 @@ display(udf_after_pdf)
 
 # CELL ********************
 
-# Validation: no Python UDF nodes should remain in the fixed plan.
+# ============================================================
+# 2️⃣ CHECK-CHANGES — Compare against baseline
+# ============================================================
+
+# Confirm the fixed plan no longer has Python UDF nodes or fallback operators.
 udf_after_plan = plan_string(result_udf_after)
 udf_after_fallbacks = extract_nee_fallbacks(udf_after_plan)
 udf_after_evidence = {
@@ -527,7 +601,11 @@ result_udf_after.explain(mode="formatted")
 
 # CELL ********************
 
-# BENCHMARK / DIAGNOSE: collecting raw rows to the driver defeats Spark.
+# ============================================================
+# 3️⃣ BENCHMARK — Capture baseline query time
+# ============================================================
+
+# The baseline collects every raw transaction to the driver before aggregating.
 print("🐌 Running baseline query with driver-side collect...\n")
 
 inv = spark.table(table_ref("inventory_transaction")).select(
@@ -537,7 +615,8 @@ print(f"About to collect {TABLE_METRICS['inventory_transaction']['rows']:,} inve
 print("spark.driver.maxResultSize =", spark.conf.get("spark.driver.maxResultSize"))
 
 start = time.time()
-collected_inventory = inv.benchmark("Driver Collect", "before").collect()
+with benchmark_op("Driver Collect", "before", spark):
+    collected_inventory = inv.collect()
 with benchmark_op("Driver Python Aggregation", "before", spark):
     inventory_by_line = defaultdict(int)
     for row in collected_inventory:
@@ -546,14 +625,28 @@ with benchmark_op("Driver Python Aggregation", "before", spark):
             qty = -abs(qty)
         inventory_by_line[row["line_id"] or "UNKNOWN"] += qty
 
-driver_result_rows = [
-    {"line_id": line_id, "net_quantity": qty}
-    for line_id, qty in inventory_by_line.items()
-]
+    driver_result_rows = [
+        {"line_id": line_id, "net_quantity": qty}
+        for line_id, qty in inventory_by_line.items()
+    ]
 driver_elapsed_ms = (time.time() - start) * 1000
 print(f"Driver-side Python aggregation elapsed: {driver_elapsed_ms:.2f} ms")
 display(driver_result_rows)
 
+# METADATA ********************
+
+# META {
+# META   "language": "python",
+# META   "language_group": "synapse_pyspark"
+# META }
+
+# CELL ********************
+
+# =================================================================================================
+# 3️⃣ DIAGNOSE — Prove the root cause is raw-row transfer to the driver
+# =================================================================================================
+
+# Record how many rows crossed to the driver and why that creates OOM risk.
 driver_before_evidence = {
     "antiPattern": "Driver-side collect and Python aggregation",
     "sourceRows": TABLE_METRICS["inventory_transaction"]["rows"],
@@ -606,17 +699,22 @@ display(starter_signed_inventory.limit(5))
 
 # CELL ********************
 
-# ✅ Solution: distributed Spark aggregation, then small final result to pandas/display.
+# ==================================================================================================
+# 3️⃣ FIX — Aggregate on executors and collect only the small grouped result
+# ==================================================================================================
+
+# Spark computes net inventory by line before the driver receives the display result.
 print("✅ Running fixed query with distributed aggregation...\n")
 
-result_driver_after = (
-    starter_signed_inventory
-    .groupBy("line_id")
-    .agg(F.sum("signed_quantity").alias("net_quantity"))
-    .orderBy(F.desc("net_quantity"))
-    .benchmark("Driver Collect", "after")
-)
-driver_after_pdf = result_driver_after.toPandas()
+with benchmark_op("Driver Collect", "after", spark):
+    result_driver_after = (
+        starter_signed_inventory
+        .groupBy("line_id")
+        .agg(F.sum("signed_quantity").alias("net_quantity"))
+        .orderBy(F.desc("net_quantity"))
+    )
+    driver_after_pdf = result_driver_after.toPandas()
+
 display(driver_after_pdf)
 
 # METADATA ********************
@@ -628,7 +726,11 @@ display(driver_after_pdf)
 
 # CELL ********************
 
-# Validation: the fixed path collects only the final grouped rows.
+# ============================================================
+# 3️⃣ CHECK-CHANGES — Compare against baseline
+# ============================================================
+
+# Verify the fixed path collects only the final grouped rows.
 record_result("driver_collect", "after", {
     "antiPattern": "Driver-side collect and Python aggregation",
     "baselineCollectedRows": driver_before_evidence["collectedRows"],
@@ -666,7 +768,11 @@ result_driver_after.explain(mode="formatted")
 
 # CELL ********************
 
-# BENCHMARK / DIAGNOSE: missing join predicate creates a Cartesian product.
+# ============================================================
+# 4️⃣ BENCHMARK — Capture baseline query time
+# ============================================================
+
+# The baseline omits the equality key and creates N × M join work.
 print("🐌 Running baseline query with missing join key...\n")
 
 qi = spark.table(table_ref("quality_inspection")).select(
@@ -684,19 +790,34 @@ po = spark.table(table_ref("production_order")).select(
 estimated_pairs = TABLE_METRICS["quality_inspection"]["rows"] * TABLE_METRICS["production_order"]["rows"]
 print(f"Estimated Cartesian pairs: {estimated_pairs:,}")
 
-result_cartesian_before = (
-    qi.crossJoin(po)
-    .groupBy("machine_id")
-    .agg(
-        F.count("*").alias("joined_rows"),
-        (F.sum("pass_count") / F.sum("sample_size")).alias("pass_rate"),
+with benchmark_op("Cartesian Join", "before", spark):
+    result_cartesian_before = (
+        qi.crossJoin(po)
+        .groupBy("machine_id")
+        .agg(
+            F.count("*").alias("joined_rows"),
+            (F.sum("pass_count") / F.sum("sample_size")).alias("pass_rate"),
+        )
+        .orderBy(F.desc("joined_rows"))
     )
-    .orderBy(F.desc("joined_rows"))
-    .benchmark("Cartesian Join", "before")
-)
-cartesian_before_pdf = result_cartesian_before.toPandas()
+    cartesian_before_pdf = result_cartesian_before.toPandas()
+
 display(cartesian_before_pdf)
 
+# METADATA ********************
+
+# META {
+# META   "language": "python",
+# META   "language_group": "synapse_pyspark"
+# META }
+
+# CELL ********************
+
+# =================================================================================================
+# 4️⃣ DIAGNOSE — Prove the root cause is a Cartesian or nested-loop join
+# =================================================================================================
+
+# Inspect the executed plan and compare expected pair counts with displayed results.
 cartesian_before_plan = plan_string(result_cartesian_before)
 cartesian_before_join = (
     "BroadcastNestedLoopJoin" if "BroadcastNestedLoopJoin" in cartesian_before_plan
@@ -754,20 +875,25 @@ display(starter_join_preview)
 
 # CELL ********************
 
-# ✅ Solution: join quality inspections to production orders by production_order_id.
+# ==================================================================================================
+# 4️⃣ FIX — Add the production_order_id equality join condition
+# ==================================================================================================
+
+# The fixed query joins inspections to production orders by the real key.
 print("✅ Running fixed query with the correct join predicate...\n")
 
-result_cartesian_after = (
-    qi.join(po, join_condition)
-    .groupBy("machine_id")
-    .agg(
-        F.count("*").alias("joined_rows"),
-        (F.sum("pass_count") / F.sum("sample_size")).alias("pass_rate"),
+with benchmark_op("Cartesian Join", "after", spark):
+    result_cartesian_after = (
+        qi.join(po, join_condition)
+        .groupBy("machine_id")
+        .agg(
+            F.count("*").alias("joined_rows"),
+            (F.sum("pass_count") / F.sum("sample_size")).alias("pass_rate"),
+        )
+        .orderBy(F.desc("joined_rows"))
     )
-    .orderBy(F.desc("joined_rows"))
-    .benchmark("Cartesian Join", "after")
-)
-cartesian_after_pdf = result_cartesian_after.toPandas()
+    cartesian_after_pdf = result_cartesian_after.toPandas()
+
 display(cartesian_after_pdf)
 
 # METADATA ********************
@@ -779,7 +905,11 @@ display(cartesian_after_pdf)
 
 # CELL ********************
 
-# Validation: the fixed plan should use a real equi-join and process matched rows only.
+# ============================================================
+# 4️⃣ CHECK-CHANGES — Compare against baseline
+# ============================================================
+
+# Confirm the fixed plan uses a real equi-join and processes matched rows only.
 cartesian_after_plan = plan_string(result_cartesian_after)
 cartesian_after_join = (
     "SortMergeJoin" if "SortMergeJoin" in cartesian_after_plan
@@ -832,14 +962,14 @@ record_result("cartesian_window_rewrite", "before", {
 bad_cycle_join.explain(mode="formatted")
 
 w = Window.partitionBy("machine_id").orderBy("timestamp")
-fixed_cycle_delta = (
-    cycle_events
-    .withColumn("prev_cycle_time_ms", F.lag("cycle_time_ms").over(w))
-    .withColumn("delta_ms", F.col("cycle_time_ms") - F.col("prev_cycle_time_ms"))
-    .filter(F.col("delta_ms").isNotNull())
-    .benchmark("Cartesian Window Rewrite", "after")
-)
-fixed_cycle_count = fixed_cycle_delta.count()
+with benchmark_op("Cartesian Window Rewrite", "after", spark):
+    fixed_cycle_delta = (
+        cycle_events
+        .withColumn("prev_cycle_time_ms", F.lag("cycle_time_ms").over(w))
+        .withColumn("delta_ms", F.col("cycle_time_ms") - F.col("prev_cycle_time_ms"))
+        .filter(F.col("delta_ms").isNotNull())
+    )
+    fixed_cycle_count = fixed_cycle_delta.count()
 record_result("cartesian_window_rewrite", "after", {
     "antiPattern": "Inequality self-join instead of previous-row window",
     "fixedRows": fixed_cycle_count,
