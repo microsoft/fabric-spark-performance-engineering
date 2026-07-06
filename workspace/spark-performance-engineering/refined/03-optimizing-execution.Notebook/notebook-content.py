@@ -84,51 +84,13 @@
 
 # CELL ********************
 
-# Setup: imports, reset work schema, and execution-focused Spark configs
-import json
+# Setup: reset the work schema, snapshot execution configs, and validate sources.
 from pyspark import StorageLevel
 from pyspark.sql import functions as F, Window
 from pyspark.sql.functions import broadcast, spark_partition_id
 
 SOURCE_SCHEMA = "bronze"
 WORK_SCHEMA = "opt_exec"
-RESULTS = []
-ORIGINAL_CONF = {}
-
-
-def table_ref(name: str, schema: str = SOURCE_SCHEMA) -> str:
-    return f"`{schema}`.`{name}`"
-
-
-def set_job(label: str) -> None:
-    spark.sparkContext.setJobDescription(f"Module 3 - {label}")
-
-
-def remember_conf(key: str) -> None:
-    if key not in ORIGINAL_CONF:
-        ORIGINAL_CONF[key] = spark.conf.get(key, None)
-
-
-def restore_conf(key: str) -> None:
-    if key in ORIGINAL_CONF:
-        if ORIGINAL_CONF[key] is None:
-            spark.conf.unset(key)
-        else:
-            spark.conf.set(key, ORIGINAL_CONF[key])
-
-
-def explain_to_string(df) -> str:
-    return df._jdf.queryExecution().toString()
-
-
-def record_result(exercise: str, status: str, evidence: dict) -> None:
-    row = {"exercise": exercise, "status": status, "evidence": evidence}
-    RESULTS.append(row)
-    print("OPT_EXEC_RESULT\n" + json.dumps(row, indent=2, sort_keys=True, default=str))
-
-
-def one_col_map(rows, key_col="name", value_col="total_count"):
-    return {r[key_col]: int(r[value_col] or 0) for r in rows}
 
 for key in [
     "spark.sql.adaptive.enabled",
@@ -140,8 +102,7 @@ for key in [
 ]:
     remember_conf(key)
 
-spark.sql(f"DROP SCHEMA IF EXISTS {WORK_SCHEMA} CASCADE")
-spark.sql(f"CREATE SCHEMA {WORK_SCHEMA}")
+reset_work_schema(WORK_SCHEMA)
 spark.conf.set("spark.sql.adaptive.enabled", "true")
 spark.conf.set("spark.sql.adaptive.coalescePartitions.enabled", "true")
 spark.conf.set("spark.microsoft.delta.parallelSnapshotLoading.enabled", "true")
@@ -149,17 +110,13 @@ spark.conf.set("spark.microsoft.delta.snapshot.driverMode.enabled", "true")
 
 required = [
     "manufacturing_event", "production_order", "parts", "web_order",
-    "inventory_transaction", "inventory_parts", "inventories", "sets", "themes"
+    "inventory_transaction", "inventory_parts", "inventories", "sets", "themes",
 ]
-available = {r.tableName for r in spark.sql(f"SHOW TABLES IN `{SOURCE_SCHEMA}`").collect()}
-missing = [t for t in required if t not in available]
-if missing:
-    raise RuntimeError(f"Missing required source tables in {SOURCE_SCHEMA}: {missing}")
-SOURCE_METRICS = {t: get_table_metrics(table_ref(t)) for t in required[:4]}
-show_metrics(table_ref("manufacturing_event"), "read-only source sample")
+require_tables(required, SOURCE_SCHEMA)
+SOURCE_METRICS = {t: get_table_metrics(table_ref(t, SOURCE_SCHEMA)) for t in required[:4]}
+show_metrics(table_ref("manufacturing_event", SOURCE_SCHEMA), "read-only source sample")
 print("Spark application ID:", spark.sparkContext.applicationId)
-print("Read-only source schema:", SOURCE_SCHEMA)
-print("Reset work schema:", WORK_SCHEMA)
+print("Read-only source schema:", SOURCE_SCHEMA, "| Work schema:", WORK_SCHEMA)
 print(json.dumps({"sourceMetricsSample": SOURCE_METRICS}, indent=2, sort_keys=True))
 
 # METADATA ********************
@@ -229,7 +186,7 @@ display(spark.createDataFrame(q1_before_rows))
 # =================================================================================================
 
 # Diagnosis: verify sort-merge and use Spark UI > SQL/DataFrame for shuffle stages.
-q1_before_plan = explain_to_string(q1_before_df)
+q1_before_plan = explain_string(q1_before_df)
 print(q1_before_plan)
 print(json.dumps({
     "hasSortMergeJoin": "SortMergeJoin" in q1_before_plan,
@@ -264,7 +221,7 @@ print(json.dumps({
 q1_attempt_df = (q1_events.join(q1_orders, "production_order_id").join(q1_parts, "part_num")
     .groupBy("part_material").agg(F.count("*").alias("events"), F.sum("is_defect").alias("defects"), F.avg("cycle_time_ms").alias("avg_cycle_ms"))
     .orderBy("part_material"))
-print(explain_to_string(q1_attempt_df)[:1200])
+print(explain_string(q1_attempt_df)[:1200])
 
 # METADATA ********************
 
@@ -303,7 +260,7 @@ restore_conf("spark.sql.autoBroadcastJoinThreshold")
 # ============================================================
 
 # Validation: same result, broadcast plan.
-q1_after_plan = explain_to_string(q1_after_df)
+q1_after_plan = explain_string(q1_after_df)
 q1_before_map = {r["part_material"]: (r["events"], r["defects"], round(float(r["avg_cycle_ms"] or 0), 4)) for r in q1_before_rows}
 q1_after_map = {r["part_material"]: (r["events"], r["defects"], round(float(r["avg_cycle_ms"] or 0), 4)) for r in q1_after_rows}
 valid = q1_before_map == q1_after_map and "BroadcastHashJoin" in q1_after_plan
@@ -565,7 +522,7 @@ display(spark.createDataFrame(q3_before_rows).limit(10))
 # =================================================================================================
 
 # Diagnosis: plan, partition distribution, and Spark UI task/spill pointer.
-q3_before_plan = explain_to_string(q3_before_df)
+q3_before_plan = explain_string(q3_before_df)
 print(q3_before_plan)
 print(json.dumps({
     "shufflePartitions": spark.conf.get("spark.sql.shuffle.partitions"),
@@ -707,7 +664,7 @@ with benchmark_op("Caching / repeated reads", "before", spark):
             .groupBy("transaction_type", "order_status")
             .agg(F.count("*").alias("transactions"), F.sum("quantity").alias("quantity"))
         )
-        q4_before_plans.append(explain_to_string(branch))
+        q4_before_plans.append(explain_string(branch))
         q4_before_rows.extend(branch.collect())
 display(spark.createDataFrame(q4_before_rows))
 
@@ -760,7 +717,7 @@ print(json.dumps({
 # Challenge starter: this joined base is the cache candidate.
 q4_candidate_base = q4_inv.join(q4_orders, "reference_id", "left")
 print("Cache and materialize this joined base, not the raw source table.")
-print(explain_to_string(q4_candidate_base)[:1200])
+print(explain_string(q4_candidate_base)[:1200])
 
 # METADATA ********************
 
@@ -787,7 +744,7 @@ with benchmark_op("Caching / repeated reads", "after", spark):
             .groupBy("transaction_type", "order_status")
             .agg(F.count("*").alias("transactions"), F.sum("quantity").alias("quantity"))
         )
-        q4_after_plans.append(explain_to_string(branch))
+        q4_after_plans.append(explain_string(branch))
         q4_after_rows.extend(branch.collect())
 display(spark.createDataFrame(q4_after_rows))
 q4_cached_base.unpersist()
@@ -867,7 +824,7 @@ q5_stream_before_df = (spark.readStream.table(table_ref("manufacturing_event"))
     .select(F.to_timestamp(F.col("manufacturing_event.timestamp")).alias("event_ts"), F.col("manufacturing_event.machine_id").alias("machine_id"), F.col("manufacturing_event.defect_detected").cast("int").alias("is_defect"))
     .groupBy(F.window("event_ts", "1 hour"), "machine_id")
     .agg(F.count("*").alias("events"), F.sum("is_defect").alias("defects")))
-q5_before_plan = explain_to_string(q5_stream_before_df)
+q5_before_plan = explain_string(q5_stream_before_df)
 print(q5_before_plan)
 
 # METADATA ********************
@@ -945,7 +902,7 @@ q5_stream_after_df = (spark.readStream.table(table_ref("manufacturing_event"))
     .withWatermark("event_ts", q5_watermark_delay)
     .groupBy(F.window("event_ts", "1 hour"), "machine_id")
     .agg(F.count("*").alias("events"), F.sum("is_defect").alias("defects")))
-q5_after_plan = explain_to_string(q5_stream_after_df)
+q5_after_plan = explain_string(q5_stream_after_df)
 print(q5_after_plan)
 print("For a real stream: .trigger(processingTime=q5_trigger_interval) and .option('checkpointLocation', q5_checkpoint_path).")
 
@@ -1007,14 +964,14 @@ restore_conf("spark.sql.streaming.statefulOperator.checkCorrectness.enabled")
 # CELL ********************
 
 # Final validation summary and config cleanup
-failed = [r for r in RESULTS if r["status"] != "passed"]
-summary = {"sparkApplicationId": spark.sparkContext.applicationId, "resultCount": len(RESULTS), "failedCount": len(failed), "results": RESULTS}
+failed = [r for r in results if r["status"] != "passed"]
+summary = {"sparkApplicationId": spark.sparkContext.applicationId, "resultCount": len(results), "failedCount": len(failed), "results": results}
 print("OPT_EXEC_FINAL_SUMMARY_START")
 print(json.dumps(summary, indent=2, sort_keys=True, default=str))
 print("OPT_EXEC_FINAL_SUMMARY_END")
-for key in list(ORIGINAL_CONF.keys()):
+for key in list(_ORIGINAL_CONF.keys()):
     restore_conf(key)
-assert len(RESULTS) == 5, f"Expected 5 exercise validations, got {len(RESULTS)}"
+assert len(results) == 5, f"Expected 5 exercise validations, got {len(results)}"
 assert not failed, f"Failed validations: {failed}"
 
 # METADATA ********************

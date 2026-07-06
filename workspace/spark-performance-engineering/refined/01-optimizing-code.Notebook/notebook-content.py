@@ -74,110 +74,19 @@
 
 # CELL ********************
 
-# Setup: imports, workspace schema reset, source table helpers, and diagnostic utilities
-from collections import defaultdict
-import json
-import re
-import time
-
-from pyspark.sql import DataFrame
+# Setup: reset the work schema, validate sources, and capture baseline metrics.
 from pyspark.sql import functions as F
-from pyspark.sql.types import DoubleType
 from pyspark.sql.window import Window
 
 SOURCE_SCHEMA = "bronze"
 WORK_SCHEMA = "opt_code"
-MODULE_RESULTS = []
-
-
-def table_ref(name: str) -> str:
-    return f"`{SOURCE_SCHEMA}`.`{name}`"
-
-
-def plan_string(df: DataFrame) -> str:
-    return df._jdf.queryExecution().executedPlan().toString()
-
-
-def scan_filters(df: DataFrame) -> dict:
-    file_scans = [node for node in plan_string(df).split("\n") if "FileScan" in node]
-    last_file_scan = file_scans[-1].strip() if file_scans else ""
-    data_filters = re.search(r"DataFilters: \[(.*?)\]", last_file_scan)
-    pushed_filters = re.search(r"PushedFilters: \[(.*?)\]", last_file_scan)
-    return {
-        "fileScan": last_file_scan,
-        "dataFilters": data_filters.group(1) if data_filters else "",
-        "pushedFilters": pushed_filters.group(1) if pushed_filters else "",
-    }
-
-
-# Used for NEE fallback analysis. If the plan has no Velox transition blocks, this returns zeroes.
-block_pattern = re.compile(
-    r"(?ms)^\s*\+-\s*RowToVeloxColumnar\b[^\n]*\n(?P<block>.*?)^\s*\+-\s*VeloxColumnarToRow\b"
-)
-op_pattern = re.compile(
-    r"(?m)^\s*\+-\s*(?:\^\(\d+\)\s*)?(?P<op>[A-Za-z][A-Za-z0-9]*)\b"
-)
-
-
-def extract_nee_fallbacks(plan: str) -> dict:
-    fallback_blocks = []
-    fallback_operations = []
-    for match in block_pattern.finditer(plan):
-        block_text = match.group("block")
-        block_lines = [line.strip() for line in block_text.split("\n") if line.strip()]
-        block_ops = op_pattern.findall(block_text)
-        fallback_blocks.append({"operations": block_lines, "operatorNames": block_ops})
-        fallback_operations.extend(block_ops)
-    return {
-        "blockCount": len(fallback_blocks),
-        "operatorCount": len(fallback_operations),
-        "operators": fallback_operations,
-        "blocks": fallback_blocks,
-    }
-
-
-def table_metrics(name: str) -> dict:
-    ref = table_ref(name)
-    detail_metrics = get_table_metrics(ref)
-    detail = spark.sql(f"DESCRIBE DETAIL {ref}").collect()[0].asDict()
-    return {
-        "table": f"{SOURCE_SCHEMA}.{name}",
-        "rows": spark.table(ref).count(),
-        "numFiles": int(detail.get("numFiles") or detail_metrics.get("num_files") or 0),
-        "sizeMB": float(detail_metrics.get("size_mb") or 0),
-        "avgFileKB": float(detail_metrics.get("avg_file_kb") or 0),
-        "format": detail.get("format"),
-        "partitions": spark.table(ref).rdd.getNumPartitions(),
-    }
-
-
-def recent_history(name: str, limit: int = 3) -> list:
-    return [
-        row.asDict()
-        for row in spark.sql(f"DESCRIBE HISTORY {table_ref(name)}")
-        .select("version", "timestamp", "operation")
-        .limit(limit)
-        .collect()
-    ]
-
-
-def record_result(exercise: str, phase: str, evidence: dict) -> None:
-    row = {"exercise": exercise, "phase": phase, "evidence": evidence}
-    MODULE_RESULTS.append(row)
-    print("MODULE1_RESULT\n" + json.dumps(row, default=str, indent=2))
-
-
-print("Spark application ID:", spark.sparkContext.applicationId)
-print("Current database:", spark.catalog.currentDatabase())
-print("Source schema:", SOURCE_SCHEMA)
-print("Resetting work schema:", WORK_SCHEMA)
-spark.sql(f"DROP SCHEMA IF EXISTS {WORK_SCHEMA} CASCADE")
-spark.sql(f"CREATE SCHEMA {WORK_SCHEMA}")
 
 spark.conf.set("spark.microsoft.delta.parallelSnapshotLoading.enabled", "true")
 spark.conf.set("spark.microsoft.delta.snapshot.driverMode.enabled", "true")
 spark.conf.set("spark.synapse.vegas.useCache", "false")
 spark.catalog.clearCache()
+
+reset_work_schema(WORK_SCHEMA)
 
 expected_tables = [
     "manufacturing_event",
@@ -186,19 +95,18 @@ expected_tables = [
     "quality_inspection",
     "production_order",
 ]
-available_tables = {row.tableName for row in spark.sql(f"SHOW TABLES IN `{SOURCE_SCHEMA}`").collect()}
-missing = [name for name in expected_tables if name not in available_tables]
-if missing:
-    raise RuntimeError(f"Missing required Module 1 tables in schema {SOURCE_SCHEMA}: {missing}")
+require_tables(expected_tables, SOURCE_SCHEMA)
 
+print("Spark application ID:", spark.sparkContext.applicationId)
+print("Source schema:", SOURCE_SCHEMA, "| Work schema:", WORK_SCHEMA)
 print("\n=== Delta table metrics from DESCRIBE DETAIL ===")
 for table_name in expected_tables:
-    show_metrics(table_ref(table_name), "source")
+    show_metrics(table_ref(table_name, SOURCE_SCHEMA), "source")
 
-TABLE_METRICS = {name: table_metrics(name) for name in expected_tables}
+TABLE_METRICS = {name: table_metrics(name, SOURCE_SCHEMA) for name in expected_tables}
 print(json.dumps(TABLE_METRICS, default=str, indent=2))
 print("Recent manufacturing_event history:")
-print(json.dumps(recent_history("manufacturing_event"), default=str, indent=2))
+print(json.dumps(recent_history("manufacturing_event", SOURCE_SCHEMA), default=str, indent=2))
 
 # METADATA ********************
 
@@ -280,7 +188,7 @@ predicate_before_evidence = {
     "pushedFilters": predicate_before_scan["pushedFilters"],
     "planHasSubstring": "substring" in plan_string(result_predicate_before).lower(),
 }
-record_result("predicate_pushdown", "before", predicate_before_evidence)
+print(json.dumps(predicate_before_evidence, default=str, indent=2))
 
 # METADATA ********************
 
@@ -469,7 +377,7 @@ udf_before_evidence = {
     "neeFallbackCount": udf_before_fallbacks["operatorCount"],
     "neeFallbackOperators": udf_before_fallbacks["operators"],
 }
-record_result("python_udfs", "before", udf_before_evidence)
+print(json.dumps(udf_before_evidence, default=str, indent=2))
 
 # METADATA ********************
 
@@ -654,7 +562,7 @@ driver_before_evidence = {
     "resultRows": len(driver_result_rows),
     "driverOomRisk": "Raw rows are transferred to the driver; toPandas has the same risk profile.",
 }
-record_result("driver_collect", "before", driver_before_evidence)
+print(json.dumps(driver_before_evidence, default=str, indent=2))
 
 # METADATA ********************
 
@@ -833,7 +741,7 @@ cartesian_before_evidence = {
     "expectedPlanSignal": "CartesianProduct or BroadcastNestedLoopJoin",
     "executedJoin": cartesian_before_join,
 }
-record_result("cartesian_join", "before", cartesian_before_evidence)
+print(json.dumps(cartesian_before_evidence, default=str, indent=2))
 
 # METADATA ********************
 
@@ -953,12 +861,12 @@ bad_cycle_join = a.join(b, F.col("b.timestamp") < F.col("a.timestamp")).select(
 
 bad_cycle_plan = plan_string(bad_cycle_join)
 cycle_rows = cycle_events.count()
-record_result("cartesian_window_rewrite", "before", {
+print(json.dumps({
     "antiPattern": "Inequality self-join instead of previous-row window",
     "filteredRows": cycle_rows,
     "estimatedPairs": cycle_rows * cycle_rows,
     "planHasCartesianSignal": "CartesianProduct" in bad_cycle_plan or "BroadcastNestedLoopJoin" in bad_cycle_plan,
-})
+}, default=str, indent=2))
 bad_cycle_join.explain(mode="formatted")
 
 w = Window.partitionBy("machine_id").orderBy("timestamp")

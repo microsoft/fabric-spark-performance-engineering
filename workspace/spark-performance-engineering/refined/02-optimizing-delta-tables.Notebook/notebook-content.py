@@ -83,22 +83,20 @@ WORK_SCHEMA = "opt_tables"
 if "_BenchmarkProxy" not in globals():
     raise RuntimeError("_benchmark_utils did not load. Run the first cell before continuing.")
 
-_ORIGINAL_CONF = {
-    "spark.sql.adaptive.enabled": spark.conf.get("spark.sql.adaptive.enabled", "true"),
-    "spark.sql.shuffle.partitions": spark.conf.get("spark.sql.shuffle.partitions", "200"),
-    "spark.databricks.delta.optimizeWrite.enabled": spark.conf.get("spark.databricks.delta.optimizeWrite.enabled", "false"),
-    "spark.databricks.delta.autoCompact.enabled": spark.conf.get("spark.databricks.delta.autoCompact.enabled", "false"),
-}
+for key in [
+    "spark.sql.adaptive.enabled",
+    "spark.sql.shuffle.partitions",
+    "spark.databricks.delta.optimizeWrite.enabled",
+    "spark.databricks.delta.autoCompact.enabled",
+]:
+    remember_conf(key)
 
 spark.conf.set("spark.sql.adaptive.enabled", "true")
 spark.conf.set("spark.sql.shuffle.partitions", "64")
 spark.conf.set("spark.databricks.delta.optimizeWrite.enabled", "false")
 spark.conf.set("spark.databricks.delta.autoCompact.enabled", "false")
 
-spark.sql(f"DROP SCHEMA IF EXISTS {WORK_SCHEMA} CASCADE")
-spark.sql(f"CREATE SCHEMA {WORK_SCHEMA}")
-
-print(f"✅ Work schema reset: {WORK_SCHEMA}")
+reset_work_schema(WORK_SCHEMA)
 print(f"   Source tables remain untouched in schema: {SOURCE_SCHEMA}")
 
 # METADATA ********************
@@ -1265,8 +1263,13 @@ display(spark.sql(f"SHOW TBLPROPERTIES {EX7_TABLE}").filter("key LIKE 'delta.aut
 # CELL ********************
 
 # Optional tear-down for session-level configs changed by this notebook
-for key, value in _ORIGINAL_CONF.items():
-    spark.conf.set(key, value)
+for key in [
+    "spark.sql.adaptive.enabled",
+    "spark.sql.shuffle.partitions",
+    "spark.databricks.delta.optimizeWrite.enabled",
+    "spark.databricks.delta.autoCompact.enabled",
+]:
+    restore_conf(key)
 
 print("✅ Session-level Spark configs restored.")
 print(f"Notebook tables remain in {WORK_SCHEMA} for inspection and re-runs.")
