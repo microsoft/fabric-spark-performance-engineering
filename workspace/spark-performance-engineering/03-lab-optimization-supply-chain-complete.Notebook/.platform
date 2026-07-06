@@ -3,7 +3,7 @@
   "metadata": {
     "type": "Notebook",
     "displayName": "03-lab-optimization-supply-chain-complete",
-    "description": "Complete Lab 3 Optimization Patterns notebook with six-part structure, investigations, fixes, and validations."
+    "description": "Each exercise follows the six Lab Details principles: context, setup, problem, investigation, fix, and validation. The notebook uses existing Lego lakehouse data. Missing scenario-specific tables, such as web_order_skewed, are derived in memory only and are not written to the lakehouse."
   },
   "config": {
     "version": "2.0",

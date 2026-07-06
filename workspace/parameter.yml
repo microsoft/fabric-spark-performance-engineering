@@ -53,11 +53,11 @@ find_replace:
       _ALL_: "$items.SparkJobDefinition.source_to_bronze_optimized.$id" # SJD GUID (dynamic)
     is_regex: "false"
     item_type: "Notebook" # filter on notebook files
-    item_name: ["02-configuration-and-table-design"] # filter on specific notebook files
+    item_name: ["02-delta-table-design-and-optimization"] # filter on specific notebook files
 
   - find_value: $workspaceId
     replace_value:
       _ALL_: "$workspace.$id" # workspace ID (dynamic)
     is_regex: "false"
     item_type: "Notebook" # filter on notebook files
-    item_name: ["02-configuration-and-table-design"] # filter on specific notebook files
+    item_name: ["02-delta-table-design-and-optimization"] # filter on specific notebook files

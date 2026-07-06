@@ -82,9 +82,9 @@
 # | Module | Notebook | What you'll learn |
 # |--------|----------|--------------------|
 # | **1 — Performance Diagnostics** | `01-lab-diagnostics.ipynb` | Reading the Spark UI, query plans, and Delta metadata to localize bottlenecks |
-# | **2 — Configuration & Tuning** | `02-configuration-and-table-design.ipynb` | OPTIMIZE / compaction, deletion vectors, liquid clustering, data skipping stats |
+# | **2 — Delta Table Design & Optimization** | `02-delta-table-design-and-optimization.ipynb` | OPTIMIZE / compaction, deletion vectors, liquid clustering, data skipping stats |
 # | **3 — Optimization Patterns** | `03-lab-optimization.ipynb` | Join strategies, caching, AQE, shuffle tuning |
-# | **4 — Advanced Debugging** | `04-debugging.ipynb` | Triage 5 reproducible failure modes end-to-end |
+# | **4 — Advanced Debugging** | `04-advanced-debugging.ipynb` | Triage 4 reproducible failure modes end-to-end |
 # 
 # ### Helper / shared notebooks
 # 

@@ -9,11 +9,11 @@
 # META   "dependencies": {
 # META     "lakehouse": {
 # META       "default_lakehouse": "28f1e957-ea23-49e8-846b-be0d8a67412e",
-# META       "default_lakehouse_name": "lego4",
-# META       "default_lakehouse_workspace_id": "7FC5EFF4-7153-4DA9-B909-54981A3FFCDB",
+# META       "default_lakehouse_name": "lego",
+# META       "default_lakehouse_workspace_id": "7fc5eff4-7153-4da9-b909-54981a3ffcdb",
 # META       "known_lakehouses": [
 # META         {
-# META           "id": "28F1E957-EA23-49E8-846B-BE0D8A67412E"
+# META           "id": "28f1e957-ea23-49e8-846b-be0d8a67412e"
 # META         }
 # META       ]
 # META     },
@@ -26,7 +26,7 @@
 
 # MARKDOWN ********************
 
-# # Lab 3: LEGO Supply Chain Optimization Challenge (Complete Version)
+# # Lab 3: LEGO Supply Chain Optimization Challenge
 # 
 # Each exercise follows the six Lab Details principles: context, setup, problem, investigation, fix, and validation. The notebook uses existing `Lego` lakehouse data. Missing scenario-specific tables, such as `web_order_skewed`, are derived in memory only and are not written to the lakehouse.
 
@@ -94,9 +94,25 @@ print("web_order_skewed exists:", "web_order_skewed" in available)
 
 # 3A Setup cell
 set_job("3A setup")
-q3a_mfg=spark.table(table_ref("manufacturing_event")).select(F.col("manufacturing_event.production_order_id").alias("production_order_id"),F.col("manufacturing_event.part_num").alias("part_num"),F.col("manufacturing_event.defect_detected").cast("int").alias("is_defect"),F.col("manufacturing_event.cycle_time_ms").alias("cycle_time_ms"))
-q3a_po=spark.table(table_ref("production_order")).select(F.col("production_order.production_order_id").alias("production_order_id"),F.col("production_order.status").alias("status"))
-q3a_parts=spark.table(table_ref("parts")).select("part_num","part_material","part_cat_id")
+q3a_mfg = (
+    spark.table(table_ref("manufacturing_event"))
+    .select(
+        F.col("manufacturing_event.production_order_id").alias("production_order_id"),
+        F.col("manufacturing_event.part_num").alias("part_num"),
+        F.col("manufacturing_event.defect_detected").cast("int").alias("is_defect"),
+        F.col("manufacturing_event.cycle_time_ms").alias("cycle_time_ms"),
+    )
+)
+q3a_po = (
+    spark.table(table_ref("production_order"))
+    .select(
+        F.col("production_order.production_order_id").alias("production_order_id"),
+        F.col("production_order.status").alias("status"),
+    )
+)
+q3a_parts = spark.table(table_ref("parts")).select(
+    "part_num", "part_material", "part_cat_id"
+)
 
 # METADATA ********************
 
@@ -108,11 +124,31 @@ q3a_parts=spark.table(table_ref("parts")).select("part_num","part_material","par
 # CELL ********************
 
 # 3A Problem cell
-set_job("3A problem no broadcast"); remember_conf("spark.sql.autoBroadcastJoinThreshold"); spark.conf.set("spark.sql.autoBroadcastJoinThreshold","-1")
+set_job("3A problem no broadcast")
+remember_conf("spark.sql.autoBroadcastJoinThreshold")
+spark.conf.set("spark.sql.autoBroadcastJoinThreshold", "-1")
+
+
 def q3a_problem_action():
-    df=q3a_mfg.join(q3a_po,"production_order_id").join(q3a_parts,"part_num").groupBy("part_material").agg(F.count("*").alias("events"),F.sum("is_defect").alias("defects"),F.avg("cycle_time_ms").alias("avg_cycle_ms")).orderBy("part_material")
+    df = (
+        q3a_mfg.join(q3a_po, "production_order_id")
+        .join(q3a_parts, "part_num")
+        .groupBy("part_material")
+        .agg(
+            F.count("*").alias("events"),
+            F.sum("is_defect").alias("defects"),
+            F.avg("cycle_time_ms").alias("avg_cycle_ms"),
+        )
+        .orderBy("part_material")
+    )
     return df, df.collect()
-(PROBLEM_OUTPUTS["3A"], q3a_problem_seconds)=run_timed("3A problem", q3a_problem_action); q3a_problem_df,q3a_problem_rows=PROBLEM_OUTPUTS["3A"]; display(q3a_problem_df)
+
+
+(PROBLEM_OUTPUTS["3A"], q3a_problem_seconds) = run_timed(
+    "3A problem", q3a_problem_action
+)
+q3a_problem_df, q3a_problem_rows = PROBLEM_OUTPUTS["3A"]
+display(q3a_problem_df)
 
 # METADATA ********************
 

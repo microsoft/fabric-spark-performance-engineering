@@ -2,11 +2,11 @@
   "$schema": "https://developer.microsoft.com/json-schemas/fabric/gitIntegration/platformProperties/2.0.0/schema.json",
   "metadata": {
     "type": "Notebook",
-    "displayName": "04-debugging",
-    "description": "New notebook"
+    "displayName": "01-lab-diagnostics-factory-dashboard-slow-sql",
+    "description": ""
   },
   "config": {
     "version": "2.0",
-    "logicalId": "fb2a6b2a-4ea8-a269-4eca-625677471b4c"
+    "logicalId": "ddb9facd-5ec7-838b-4ad7-59b01050ef64"
   }
 }

@@ -2,8 +2,8 @@
   "$schema": "https://developer.microsoft.com/json-schemas/fabric/gitIntegration/platformProperties/2.0.0/schema.json",
   "metadata": {
     "type": "Notebook",
-    "displayName": "02-configuration-and-table-design",
-    "description": "New notebook"
+    "displayName": "02-delta-table-design-and-optimization",
+    "description": "Learn how to identify common Delta table performance problems, apply the right optimization, and validate the impact with before-and-after benchmarks."
   },
   "config": {
     "version": "2.0",
