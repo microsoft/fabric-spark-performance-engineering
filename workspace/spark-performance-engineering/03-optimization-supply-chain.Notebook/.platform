@@ -2,11 +2,11 @@
   "$schema": "https://developer.microsoft.com/json-schemas/fabric/gitIntegration/platformProperties/2.0.0/schema.json",
   "metadata": {
     "type": "Notebook",
-    "displayName": "01-lab-diagnostics-factory-dashboard-slow-sql",
-    "description": ""
+    "displayName": "03-optimization-supply-chain",
+    "description": "Follow 6 exercises on how to optimize different Spark Workloads"
   },
   "config": {
     "version": "2.0",
-    "logicalId": "ddb9facd-5ec7-838b-4ad7-59b01050ef64"
+    "logicalId": "fe3beb86-9194-a992-4be2-d03f456f6043"
   }
 }

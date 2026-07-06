@@ -26,18 +26,48 @@
 
 # MARKDOWN ********************
 
-# # Lab 1: Diagnostics - The Factory Dashboard is Slow
+# # 🏗️ **Module 1: Diagnostics – The Factory Dashboard is Slow**
 # 
-# This read-only notebook reproduces the six diagnostics prompts from the workshop repository for the LEGO factory dashboard. Run the cells and use the Spark UI / Monitoring Hub to identify the anti-pattern behind each slow query.
+# Learn how to identify common Spark performance anti‑patterns behind a slow Power BI / Fabric dashboard, diagnose them using Spark plans and the UI, apply targeted fixes, and validate the impact with before‑and‑after benchmarks.
 # 
-# **Workspace:** `dpns_2026_spark_performance`  
-# **Lakehouse:** `Lego`  
-# **Schema:** `bronze`
+# You’ll work through six realistic queries that power a LEGO manufacturing analytics dashboard:
 # 
-# **🔄 Switch Experience:**  
-# Looking for the SQL version? Check out [01-lab-diagnostics-factory-dashboard-slow-sql](../01-lab-diagnostics-factory-dashboard-slow-sql/01-lab-diagnostics-factory-dashboard-slow-sql.ipynb)
+# 1. **Daily defect rate by machine** – predicate pushdown and partition pruning
+# 2. **Top customers by spend** – Python UDF overhead vs. built‑in functions
+# 3. **Inventory levels by plant/line** – driver‑side `.collect()` vs. distributed aggregation
+# 4. **Event fan‑out by defect type** – repeated scans vs. caching shared intermediates
+# 5. **Quality inspection pass rates** – Cartesian joins from missing join predicates
+# 6. **Event aggregation by day** – unnecessary caching and Native Execution Engine (NEE) fallback
 # 
-# The notebook intentionally runs inefficient read-only queries. It does not create, update, delete, optimize, vacuum, analyze, or write any lakehouse data.
+# **Duration:** 60 minutes | **Level:** 300–400
+# 
+# ---
+# 
+# ### Scenario
+# 
+# The LEGO manufacturing analytics team has built a factory quality and operations dashboard backed by Spark queries over Lakehouse tables (bronze layer). Over time, the dashboard has become noticeably slower as data volumes and usage have grown.
+# 
+# Your investigation reveals that several visuals are powered by inefficient Spark patterns:
+# - Full table scans without effective predicate pushdown
+# - Python UDFs blocking NEE optimizations
+# - Driver‑side `.collect()` and Python loops
+# - Repeated scans when branching to multiple outputs
+# - Cartesian joins due to missing join keys
+# - Unnecessary caching that adds overhead and can trigger NEE fallbacks
+# 
+# **Your mission:** For each query, benchmark the current behavior, diagnose the root cause using plans and metrics, implement a fix, and re‑benchmark to quantify the improvement.
+# 
+# ### Lab Pattern
+# 
+# Every exercise follows the same steps:
+# 
+# | Step | What you do |
+# |------|-------------|
+# | 🐌 **Benchmark** | Run a query and capture the baseline time/metric |
+# | 🔍 **Diagnose** | Inspect table metadata and Spark plans to prove the root cause |
+# | 🔧 **Fix** | Apply the optimization using recommended Spark patterns |
+# | 🚀 **Re-benchmark** | Run the same test and compare against the baseline |
+
 
 # MARKDOWN ********************
 
@@ -50,7 +80,7 @@
 # | Q3 | Inventory levels by plant/line | Driver-side `.collect()` anti-pattern |
 # | Q4 | Manufacturing event fan-out by event type | Repeated scans from looped writes with no caching |
 # | Q5 | Quality inspection pass rates | Cartesian/nested-loop join from missing join key |
-# | Q6 | Monthly revenue trend | Tiny-file scan overhead on existing `web_order` Delta table |
+# | Q6 | Event aggregation by day | Unnecessary cache causing extra materialization and possible NEE fallback |
 
 # CELL ********************
 
@@ -71,6 +101,7 @@ import json
 import time
 import regex
 
+from pyspark.sql import SparkSession
 from pyspark.sql import functions as F
 from pyspark.sql.types import DoubleType
 

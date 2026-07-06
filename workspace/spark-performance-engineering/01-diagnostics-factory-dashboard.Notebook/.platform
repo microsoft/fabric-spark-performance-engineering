@@ -2,8 +2,8 @@
   "$schema": "https://developer.microsoft.com/json-schemas/fabric/gitIntegration/platformProperties/2.0.0/schema.json",
   "metadata": {
     "type": "Notebook",
-    "displayName": "01-lab-diagnostics-factory-dashboard-slow",
-    "description": "Lab 1 Diagnostics - The Factory Dashboard is Slow. Read-only reproduction notebook generated from repository workshop plan."
+    "displayName": "01-diagnostics-factory-dashboard",
+    "description": "The Factory Dashboard is Slow. Exercises to understand how to diagnose performance issues in Spark."
   },
   "config": {
     "version": "2.0",
