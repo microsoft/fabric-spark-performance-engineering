@@ -1,28 +1,5 @@
 # Fabric notebook source
 
-# METADATA ********************
-
-# META {
-# META   "kernel_info": {
-# META     "name": "synapse_pyspark"
-# META   },
-# META   "dependencies": {
-# META     "lakehouse": {
-# META       "default_lakehouse": "28f1e957-ea23-49e8-846b-be0d8a67412e",
-# META       "default_lakehouse_name": "lego",
-# META       "default_lakehouse_workspace_id": "7fc5eff4-7153-4da9-b909-54981a3ffcdb",
-# META       "known_lakehouses": [
-# META         {
-# META           "id": "28f1e957-ea23-49e8-846b-be0d8a67412e"
-# META         }
-# META       ]
-# META     },
-# META     "environment": {
-# META       "environmentId": "99FB9CB3-86D3-4877-BB60-659B3CDD45C3",
-# META       "workspaceId": "7fc5eff4-7153-4da9-b909-54981a3ffcdb"
-# META     }
-# META   }
-# META }
 
 # MARKDOWN ********************
 
@@ -108,10 +85,3 @@
 # | Notebook | What it provides |
 # |----------|------------------|
 # | `_benchmark_utils` | `df.benchmark(scenario, state)` / `benchmark_op(scenario, state, spark)` timers and `get_table_metrics()` / `show_metrics()` helpers used across modules. Don't run it standalone — each module `%run`s it. |
-
-# METADATA ********************
-
-# META {
-# META   "language": "python",
-# META   "language_group": "synapse_pyspark"
-# META }

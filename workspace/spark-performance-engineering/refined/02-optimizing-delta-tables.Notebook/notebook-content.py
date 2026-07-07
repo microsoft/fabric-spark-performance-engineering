@@ -1,28 +1,5 @@
 # Fabric notebook source
 
-# METADATA ********************
-
-# META {
-# META   "kernel_info": {
-# META     "name": "synapse_pyspark"
-# META   },
-# META   "dependencies": {
-# META     "lakehouse": {
-# META       "default_lakehouse": "28f1e957-ea23-49e8-846b-be0d8a67412e",
-# META       "default_lakehouse_name": "lego",
-# META       "default_lakehouse_workspace_id": "7fc5eff4-7153-4da9-b909-54981a3ffcdb",
-# META       "known_lakehouses": [
-# META         {
-# META           "id": "28f1e957-ea23-49e8-846b-be0d8a67412e"
-# META         }
-# META       ]
-# META     },
-# META     "environment": {
-# META       "environmentId": "99FB9CB3-86D3-4877-BB60-659B3CDD45C3",
-# META       "workspaceId": "7fc5eff4-7153-4da9-b909-54981a3ffcdb"
-# META     }
-# META   }
-# META }
 
 # MARKDOWN ********************
 
@@ -49,13 +26,6 @@
 # | 5. Data-type optimization | Rewrite `inventory_transaction` with numeric `color_id` stored as `int` instead of `string`. | Table size decreases after right-sizing types; numeric stats support cleaner filtered scans. |
 # | 6. Partitioning strategy | Compare no partitioning, high-cardinality `part_num`, and date partitioning. | Avoid over-partitioning; balanced file sizes and input-file counts align with time-range and point filters. |
 # | 7. Delta storage-regression audit | Use history and properties to find an append that regressed `inventory_transaction_audit` layout. | Isolate the commit/version that regressed file layout via `DESCRIBE HISTORY`, then verify file count and pruning recover. |
-
-# METADATA ********************
-
-# META {
-# META   "language": "python",
-# META   "language_group": "synapse_pyspark"
-# META }
 
 # CELL ********************
 
@@ -145,13 +115,6 @@ print("\n✅ Module copies are ready. All exercises mutate opt_tables only.")
 # 
 # **Fix:** Run `OPTIMIZE` to compact small files into fewer, larger Delta files.
 
-# METADATA ********************
-
-# META {
-# META   "language": "python",
-# META   "language_group": "synapse_pyspark"
-# META }
-
 # CELL ********************
 
 # ============================================================
@@ -198,13 +161,6 @@ display(spark.sql(f"DESCRIBE DETAIL {EX1_TABLE}").select("format", "numFiles", "
 # ### 🎯 Challenge
 # 
 # Compact `manufacturing_event_tiny` with `OPTIMIZE`, then inspect `DESCRIBE DETAIL` again. A healthy result should have fewer files and a larger average file size.
-
-# METADATA ********************
-
-# META {
-# META   "language": "python",
-# META   "language_group": "synapse_pyspark"
-# META }
 
 # CELL ********************
 
@@ -278,13 +234,6 @@ print(f"Average file after:  {metrics_1_after['avg_file_kb']:,.1f} KB")
 # 
 # **Fix:** Enable Optimize Write and Auto Compact on the table so new writes are bin-packed at write time and compacted after write when needed.
 
-# METADATA ********************
-
-# META {
-# META   "language": "python",
-# META   "language_group": "synapse_pyspark"
-# META }
-
 # CELL ********************
 
 # ============================================================
@@ -336,13 +285,6 @@ show_metrics(EX2_TABLE, "after bad append")
 # ### 🎯 Challenge
 # 
 # Enable `delta.autoOptimize.optimizeWrite` and `delta.autoOptimize.autoCompact` on `inventory_transaction_ow`, then repeat the same append. The exercise and all measurements use `inventory_transaction` consistently.
-
-# METADATA ********************
-
-# META {
-# META   "language": "python",
-# META   "language_group": "synapse_pyspark"
-# META }
 
 # CELL ********************
 
@@ -422,13 +364,6 @@ show_metrics(EX2_TABLE, "after optimized append")
 # 
 # **Fix:** Collect data-skipping stats for frequently filtered columns, cluster by those columns, and verify the clustering / skipping metrics.
 
-# METADATA ********************
-
-# META {
-# META   "language": "python",
-# META   "language_group": "synapse_pyspark"
-# META }
-
 # CELL ********************
 
 # ============================================================
@@ -489,13 +424,6 @@ print(f"Files referenced before clustering: {files_3_before:,}")
 # ### 🎯 Challenge
 # 
 # Enable data-skipping stats for the filtered columns, apply liquid clustering with `CLUSTER BY (color_id)`, run `OPTIMIZE ... FULL`, and inspect the `clusteringQuality` / `skippingEffectiveness` metrics returned by `OPTIMIZE`.
-
-# METADATA ********************
-
-# META {
-# META   "language": "python",
-# META   "language_group": "synapse_pyspark"
-# META }
 
 # CELL ********************
 
@@ -595,13 +523,6 @@ print("Open the Spark UI SQL scan node to confirm file pruning and data-skipping
 # 
 # **Fix:** Enable deletion vectors so Delta records row-level delete markers instead of rewriting entire files for supported DML operations.
 
-# METADATA ********************
-
-# META {
-# META   "language": "python",
-# META   "language_group": "synapse_pyspark"
-# META }
-
 # CELL ********************
 
 # ============================================================
@@ -655,13 +576,6 @@ print(f"Delete target with DVs:    set_num={set_b}, rows={count_b:,}")
 # ### 🎯 Challenge
 # 
 # Run a delete against each table, then compare the latest `DESCRIBE HISTORY` `operationMetrics`. Focus on removed/copied files and row counts, not just elapsed time.
-
-# METADATA ********************
-
-# META {
-# META   "language": "python",
-# META   "language_group": "synapse_pyspark"
-# META }
 
 # CELL ********************
 
@@ -741,13 +655,6 @@ show_metrics(EX4_WITH_DV, "after delete with DVs")
 # 
 # **Fix:** Store numeric IDs as numeric columns. Here `color_id` is intentionally written as `string`, then corrected to `int`.
 
-# METADATA ********************
-
-# META {
-# META   "language": "python",
-# META   "language_group": "synapse_pyspark"
-# META }
-
 # CELL ********************
 
 # ============================================================
@@ -806,13 +713,6 @@ display(spark.sql(f"DESCRIBE DETAIL {EX5_BAD}").select("numFiles", "sizeInBytes"
 # ### 🎯 Challenge
 # 
 # Create a corrected Delta table with `color_id` cast to `int`, then compare `DESCRIBE DETAIL` size and the same filtered scan. Keep the logical query the same; change the data at rest.
-
-# METADATA ********************
-
-# META {
-# META   "language": "python",
-# META   "language_group": "synapse_pyspark"
-# META }
 
 # CELL ********************
 
@@ -888,13 +788,6 @@ print("Numeric columns also produce numeric min/max statistics for safer filteri
 # 
 # **Fix:** Compare no partitioning, high-cardinality partitioning, and date partitioning against time-range and point-query workloads.
 
-# METADATA ********************
-
-# META {
-# META   "language": "python",
-# META   "language_group": "synapse_pyspark"
-# META }
-
 # CELL ********************
 
 # ============================================================
@@ -960,13 +853,6 @@ print(f"Point-query part_num:   {sample_part}")
 # ### 🎯 Challenge
 # 
 # Benchmark the same time-range query and point query against all three layouts. Which layout helps, and which layout creates too many files?
-
-# METADATA ********************
-
-# META {
-# META   "language": "python",
-# META   "language_group": "synapse_pyspark"
-# META }
 
 # CELL ********************
 
@@ -1064,13 +950,6 @@ display(spark.sql(f"DESCRIBE DETAIL {EX6_DATE}").select("partitionColumns", "num
 # 
 # **Fix:** Use `DESCRIBE HISTORY` and table properties to identify the regression, restore the properties, run `OPTIMIZE`, and verify file pruning/scan behavior.
 
-# METADATA ********************
-
-# META {
-# META   "language": "python",
-# META   "language_group": "synapse_pyspark"
-# META }
-
 # CELL ********************
 
 # ============================================================
@@ -1137,13 +1016,6 @@ metrics_7_regressed = show_metrics(EX7_TABLE, "after regression")
 # ### 🎯 Challenge
 # 
 # Audit the table. Use `DESCRIBE HISTORY` to find the append that added many files, and `SHOW TBLPROPERTIES` to spot property drift. Then restore the properties and compact the table.
-
-# METADATA ********************
-
-# META {
-# META   "language": "python",
-# META   "language_group": "synapse_pyspark"
-# META }
 
 # CELL ********************
 
@@ -1252,13 +1124,6 @@ display(spark.sql(f"SHOW TBLPROPERTIES {EX7_TABLE}").filter("key LIKE 'delta.aut
 # 7. **Storage-regression audit** used Delta history and properties to find drift, restore settings, and compact again.
 # 
 # The litmus test: every fix changed table layout, schema, partitioning, or Delta properties — not the query logic.
-
-# METADATA ********************
-
-# META {
-# META   "language": "python",
-# META   "language_group": "synapse_pyspark"
-# META }
 
 # CELL ********************
 

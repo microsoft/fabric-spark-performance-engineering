@@ -1,28 +1,5 @@
 # Fabric notebook source
 
-# METADATA ********************
-
-# META {
-# META   "kernel_info": {
-# META     "name": "synapse_pyspark"
-# META   },
-# META   "dependencies": {
-# META     "lakehouse": {
-# META       "default_lakehouse": "28f1e957-ea23-49e8-846b-be0d8a67412e",
-# META       "default_lakehouse_name": "lego",
-# META       "default_lakehouse_workspace_id": "7fc5eff4-7153-4da9-b909-54981a3ffcdb",
-# META       "known_lakehouses": [
-# META         {
-# META           "id": "28f1e957-ea23-49e8-846b-be0d8a67412e"
-# META         }
-# META       ]
-# META     },
-# META     "environment": {
-# META       "environmentId": "99FB9CB3-86D3-4877-BB60-659B3CDD45C3",
-# META       "workspaceId": "7fc5eff4-7153-4da9-b909-54981a3ffcdb"
-# META     }
-# META   }
-# META }
 
 # MARKDOWN ********************
 
@@ -44,13 +21,6 @@
 # **Litmus note:** Module 3 fixes are hints/config/`.cache()`/repartition. Module 1 rewrites inefficient code. Module 2 changes table design.
 
 
-# METADATA ********************
-
-# META {
-# META   "language": "python",
-# META   "language_group": "synapse_pyspark"
-# META }
-
 # MARKDOWN ********************
 
 # ## Exercise summary
@@ -63,13 +33,6 @@
 # | 4. Caching / materialization | Multiple dashboard branches repeatedly read and join the same inventory/order base. | Results stay identical; the shared joined base is materialized once and reused through cache hits instead of repeated source scans. |
 # | 5. Streaming optimizations | Hourly machine streaming aggregation is stateful without event-time cleanup. | Results stay identical for the batch proxy; streaming state is bounded by `EventTimeWatermark`, with trigger and checkpoint choices documented. |
 
-
-# METADATA ********************
-
-# META {
-# META   "language": "python",
-# META   "language_group": "synapse_pyspark"
-# META }
 
 # CELL ********************
 
@@ -137,13 +100,6 @@ print(json.dumps({"sourceMetricsSample": SOURCE_METRICS}, indent=2, sort_keys=Tr
 # A correct query joins high-volume manufacturing events to small production-order and part reference tables. With automatic broadcast disabled, Spark defaults to sort-merge joins, adding shuffle and sort overhead. Fix only the join strategy; the aggregation stays identical.
 
 
-# METADATA ********************
-
-# META {
-# META   "language": "python",
-# META   "language_group": "synapse_pyspark"
-# META }
-
 # CELL ********************
 
 # ============================================================
@@ -207,13 +163,6 @@ print(json.dumps({
 # 
 # Broadcast the small reference tables, or restore automatic broadcast/AQE, then verify `BroadcastHashJoin` appears in the physical plan.
 
-
-# METADATA ********************
-
-# META {
-# META   "language": "python",
-# META   "language_group": "synapse_pyspark"
-# META }
 
 # CELL ********************
 
@@ -288,13 +237,6 @@ assert valid, "Exercise 1 validation failed"
 # 
 # A customer rollup is correct, but one hot customer dominates the join key. With broadcast disabled and AQE skew handling off, one shuffle partition can become a straggler. Diagnose the skew, then keep the join and aggregation semantics identical while enabling AQE skew support and applying deterministic salting as a manual fallback.
 
-
-# METADATA ********************
-
-# META {
-# META   "language": "python",
-# META   "language_group": "synapse_pyspark"
-# META }
 
 # CELL ********************
 
@@ -389,13 +331,6 @@ q2_skewed.repartition(200, "customer_id").groupBy(spark_partition_id().alias("pi
 # Keep the same customer rollup. Enable AQE skew/coalesce settings and use deterministic salting: add `pmod(xxhash64(order_id), N)` to the large side, duplicate the small side across salts, then join on `(customer_id, salt)`.
 
 
-# METADATA ********************
-
-# META {
-# META   "language": "python",
-# META   "language_group": "synapse_pyspark"
-# META }
-
 # CELL ********************
 
 # Challenge starter: inspect how deterministic salt spreads the hot customers.
@@ -469,6 +404,7 @@ restore_conf("spark.sql.adaptive.advisoryPartitionSizeInBytes")
 # META   "language": "python",
 # META   "language_group": "synapse_pyspark"
 # META }
+
 # MARKDOWN ********************
 
 # ---
@@ -479,13 +415,6 @@ restore_conf("spark.sql.adaptive.advisoryPartitionSizeInBytes")
 # 
 # A KPI rollup is correct, but execution is forced into bad partitioning. One variant creates huge spill-prone tasks; another creates thousands of tiny tasks. Use Spark UI spill columns, task-duration spread, `explain()`, and `spark_partition_id()` to diagnose, then right-size partitions and re-enable AQE coalescing.
 
-
-# METADATA ********************
-
-# META {
-# META   "language": "python",
-# META   "language_group": "synapse_pyspark"
-# META }
 
 # CELL ********************
 
@@ -545,13 +474,6 @@ q3_before_input.groupBy(spark_partition_id().alias("pid")).count().orderBy(F.des
 # 
 # Preserve the KPI result but change only execution: remove the single-partition collapse, choose a reasonable shuffle count, repartition by `machine_id`, and turn AQE coalescing back on.
 
-
-# METADATA ********************
-
-# META {
-# META   "language": "python",
-# META   "language_group": "synapse_pyspark"
-# META }
 
 # CELL ********************
 
@@ -629,13 +551,6 @@ restore_conf("spark.sql.adaptive.coalescePartitions.enabled")
 # A dashboard asks for the same inventory transaction base joined to production orders, then branches by transaction type. The baseline repeatedly reads and joins the same source. The fix caches the reused joined base once; filters and aggregations remain identical.
 
 
-# METADATA ********************
-
-# META {
-# META   "language": "python",
-# META   "language_group": "synapse_pyspark"
-# META }
-
 # CELL ********************
 
 # ============================================================
@@ -704,13 +619,6 @@ print(json.dumps({
 # 
 # Materialize the shared post-join intermediate once. Then branch from the cached DataFrame for the same transaction-type filters and aggregations.
 
-
-# METADATA ********************
-
-# META {
-# META   "language": "python",
-# META   "language_group": "synapse_pyspark"
-# META }
 
 # CELL ********************
 
@@ -796,13 +704,6 @@ assert valid, "Exercise 4 validation failed"
 # A streaming aggregation over manufacturing events groups by one-hour event-time windows and machine. The baseline is stateful but has no event-time watermark, so state cleanup is unbounded. The optimized plan adds watermarking, a deliberate trigger interval, and state-store settings. This notebook builds plans safely without starting a long-running stream.
 
 
-# METADATA ********************
-
-# META {
-# META   "language": "python",
-# META   "language_group": "synapse_pyspark"
-# META }
-
 # CELL ********************
 
 # ============================================================
@@ -861,13 +762,6 @@ print(json.dumps({
 # 
 # Add a two-hour watermark on `event_ts`, choose a processing-time trigger such as `1 minute`, and plan a durable checkpoint path before starting a real `writeStream`.
 
-
-# METADATA ********************
-
-# META {
-# META   "language": "python",
-# META   "language_group": "synapse_pyspark"
-# META }
 
 # CELL ********************
 
@@ -953,13 +847,6 @@ restore_conf("spark.sql.streaming.statefulOperator.checkCorrectness.enabled")
 # 4. **Caching / materialization** — cached the reused prepared branch after expensive joins/aggregation.
 # 5. **Streaming optimizations** — bounded state with watermarking and documented trigger/checkpoint choices.
 
-
-# METADATA ********************
-
-# META {
-# META   "language": "python",
-# META   "language_group": "synapse_pyspark"
-# META }
 
 # CELL ********************
 

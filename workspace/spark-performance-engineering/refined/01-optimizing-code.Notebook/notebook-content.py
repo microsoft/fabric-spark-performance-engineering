@@ -9,7 +9,7 @@
 # META   "dependencies": {
 # META     "lakehouse": {
 # META       "default_lakehouse": "28f1e957-ea23-49e8-846b-be0d8a67412e",
-# META       "default_lakehouse_name": "lego",
+# META       "default_lakehouse_name": "toy_bricks",
 # META       "default_lakehouse_workspace_id": "7fc5eff4-7153-4da9-b909-54981a3ffcdb",
 # META       "known_lakehouses": [
 # META         {
@@ -18,8 +18,8 @@
 # META       ]
 # META     },
 # META     "environment": {
-# META       "environmentId": "99FB9CB3-86D3-4877-BB60-659B3CDD45C3",
-# META       "workspaceId": "7fc5eff4-7153-4da9-b909-54981a3ffcdb"
+# META       "environmentId": "3cdd45c3-659b-bb60-4877-86d399fb9cb3",
+# META       "workspaceId": "00000000-0000-0000-0000-000000000000"
 # META     }
 # META   }
 # META }
@@ -36,13 +36,6 @@
 # 
 # > Litmus test: if the fix is a diff to the transformation logic, it belongs here. Storage fixes are Module 2; execution, AQE, caching, and repartitioning fixes are Module 3.
 
-# METADATA ********************
-
-# META {
-# META   "language": "python",
-# META   "language_group": "synapse_pyspark"
-# META }
-
 # MARKDOWN ********************
 
 # ## Exercise summary
@@ -54,12 +47,6 @@
 # | 3 — Driver `collect()` / `toPandas()` and driver OOM | An inventory workflow collects raw transactions to the driver and aggregates in Python. | Driver result size shrinks / raw-row collect avoided; no OOM risk from full-result transfer. |
 # | 4 — Cartesian / missing join key | A pass-rate query omits the production-order join key, and a cycle-time variant uses an inequality self-join. | `CartesianProduct` / nested-loop work replaced by equi-join or window logic; runtime and pair counts drop. |
 
-# METADATA ********************
-
-# META {
-# META   "language": "python",
-# META   "language_group": "synapse_pyspark"
-# META }
 
 # CELL ********************
 
@@ -126,13 +113,6 @@ print(json.dumps(recent_history("manufacturing_event", SOURCE_SCHEMA), default=s
 # **Why it matters:** Full scans waste I/O and make a small daily dashboard behave like a whole-factory history query.
 # 
 # **Fix in one line:** Filter with a native timestamp/date expression first, then derive presentation columns.
-
-# METADATA ********************
-
-# META {
-# META   "language": "python",
-# META   "language_group": "synapse_pyspark"
-# META }
 
 # CELL ********************
 
@@ -203,21 +183,10 @@ print(json.dumps(predicate_before_evidence, default=str, indent=2))
 # 
 # Inspect the formatted plan. Look for the `FileScan` node, `DataFilters`, `PushedFilters`, and the number of files from `inputFiles()`. Then rewrite the query so the filter is expressed before the aggregation.
 
-# METADATA ********************
-
-# META {
-# META   "language": "python",
-# META   "language_group": "synapse_pyspark"
-# META }
-
 # CELL ********************
 
 # Starter: inspect the baseline physical plan and a runnable native-filter sketch.
 result_predicate_before.explain(mode="formatted")
-
-starter_predicate_filter = mfg.filter(F.to_date("timestamp") == F.lit(latest_day))
-print("Starter read files after native filter:", len(starter_predicate_filter.inputFiles()))
-display(starter_predicate_filter.select("timestamp", "machine_id", "defect_detected").limit(5))
 
 # METADATA ********************
 
@@ -238,7 +207,7 @@ print("✅ Running fixed predicate-pushdown query...\n")
 with benchmark_op("Predicate Pushdown", "after", spark):
     result_predicate_after = (
         mfg
-        .filter(F.to_date("timestamp") == F.lit(latest_day))
+        .filter(F.col("timestamp").startswith(F.lit(str(latest_day)))) # filter is now the first operation
         .withColumn("event_day", F.to_date("timestamp"))
         .groupBy("event_day", F.col("machine_id"))
         .agg(
@@ -268,15 +237,14 @@ display(predicate_after_pdf)
 # Verify the fixed plan signals and record the before/after evidence.
 predicate_after_scan = scan_filters(result_predicate_after)
 predicate_after_evidence = {
-    "antiPattern": "String timestamp transformation before filtering",
+    "antiPattern": "Full scan / weak pushdown due to string timestamp transformation",
     "baselineReadFiles": predicate_before_evidence["readFiles"],
     "fixedReadFiles": len(result_predicate_after.inputFiles()),
     "fixedDataFilters": predicate_after_scan["dataFilters"],
     "fixedPushedFilters": predicate_after_scan["pushedFilters"],
     "fixedPlanHasSubstring": "substring" in plan_string(result_predicate_after).lower(),
 }
-record_result("predicate_pushdown", "after", predicate_after_evidence)
-result_predicate_after.explain(mode="formatted")
+print(json.dumps(predicate_after_evidence, default=str, indent=2))
 
 # METADATA ********************
 
@@ -296,13 +264,6 @@ result_predicate_after.explain(mode="formatted")
 # **Why it matters:** Python UDFs force JVM↔Python serialization, usually show `BatchEvalPython` in the plan, and can trigger Native Execution Engine fallback.
 # 
 # **Fix in one line:** Replace scalar Python UDFs with built-in Spark SQL expressions.
-
-# METADATA ********************
-
-# META {
-# META   "language": "python",
-# META   "language_group": "synapse_pyspark"
-# META }
 
 # CELL ********************
 
@@ -392,13 +353,6 @@ print(json.dumps(udf_before_evidence, default=str, indent=2))
 # 
 # Inspect the plan and find the Python boundary. Then replace both UDFs: use `coalesce` / arithmetic for line totals and a native date/string function for the order day. Watch whether NEE fallback blocks disappear.
 
-# METADATA ********************
-
-# META {
-# META   "language": "python",
-# META   "language_group": "synapse_pyspark"
-# META }
-
 # CELL ********************
 
 # Starter: look for BatchEvalPython / PythonUDF and preview the native columns to use.
@@ -478,7 +432,17 @@ udf_after_evidence = {
     "fixedNeeFallbackCount": udf_after_fallbacks["operatorCount"],
     "fixedNeeFallbackOperators": udf_after_fallbacks["operators"],
 }
-record_result("python_udfs", "after", udf_after_evidence)
+print(json.dumps(udf_after_evidence, indent=2))
+
+# METADATA ********************
+
+# META {
+# META   "language": "python",
+# META   "language_group": "synapse_pyspark"
+# META }
+
+# CELL ********************
+
 result_udf_after.explain(mode="formatted")
 
 # METADATA ********************
@@ -499,13 +463,6 @@ result_udf_after.explain(mode="formatted")
 # **Why it matters:** Pulling distributed data into one process can trip task-result transport limits, executor memory while serializing results, or `spark.driver.maxResultSize`.
 # 
 # **Fix in one line:** Keep the aggregation distributed and only bring the small final result to the driver.
-
-# METADATA ********************
-
-# META {
-# META   "language": "python",
-# META   "language_group": "synapse_pyspark"
-# META }
 
 # CELL ********************
 
@@ -576,13 +533,6 @@ print(json.dumps(driver_before_evidence, default=str, indent=2))
 # ### 🎯 Challenge
 # 
 # Rewrite the workflow so executors compute the net inventory by line. The driver should receive only the grouped result, not every raw transaction row. Use the Spark UI to compare task result size before and after.
-
-# METADATA ********************
-
-# META {
-# META   "language": "python",
-# META   "language_group": "synapse_pyspark"
-# META }
 
 # CELL ********************
 
@@ -667,13 +617,6 @@ result_driver_after.explain(mode="formatted")
 # 
 # **Fix in one line:** Supply the correct equality join condition; when the intent is "previous row," use a window function instead of an inequality self-join.
 
-# METADATA ********************
-
-# META {
-# META   "language": "python",
-# META   "language_group": "synapse_pyspark"
-# META }
-
 # CELL ********************
 
 # ============================================================
@@ -755,13 +698,6 @@ print(json.dumps(cartesian_before_evidence, default=str, indent=2))
 # ### 🎯 Challenge
 # 
 # Inspect the plan for `CartesianProduct` or `BroadcastNestedLoopJoin`. Then rewrite the pass-rate query with the real key, `production_order_id`, so Spark can use an equi-join. For the cycle-time variant, replace the inequality self-join with `lag()` over a window.
-
-# METADATA ********************
-
-# META {
-# META   "language": "python",
-# META   "language_group": "synapse_pyspark"
-# META }
 
 # CELL ********************
 
@@ -902,10 +838,3 @@ fixed_cycle_delta.explain(mode="formatted")
 # You fixed four code-level Spark anti-patterns: weak predicate pushdown, Python UDF serialization and NEE fallback, driver-side raw-row collection, and missing/non-equality join logic that created Cartesian work.
 # 
 # Carry the same workflow into the next modules: benchmark the symptom, inspect the Spark UI and physical plan, check Delta metadata, change the right lever, and validate the before/after result.
-
-# METADATA ********************
-
-# META {
-# META   "language": "python",
-# META   "language_group": "synapse_pyspark"
-# META }
