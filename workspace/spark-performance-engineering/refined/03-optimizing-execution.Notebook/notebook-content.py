@@ -623,40 +623,58 @@ restore_conf("spark.sql.adaptive.coalescePartitions.enabled")
 # 
 # ### Context and problem
 # 
-# A dashboard asks for the same inventory transaction base joined to production orders, then branches by transaction type. The baseline repeatedly reads and joins the same source. The fix caches the reused joined base once; filters and aggregations remain identical.
+# A dashboard builds three rollups — by order status, by part material, and by machine — all from the **same** enriched base: inventory transactions joined to production orders and parts. The baseline recomputes that big-fact scan-and-join once per rollup, so the expensive work runs three times. The fix materializes the shared base once and reuses it; every rollup's filters and aggregations stay identical.
 
+# METADATA ********************
+
+# META {
+# META   "language": "python",
+# META   "language_group": "synapse_pyspark"
+# META }
 
 # CELL ********************
 
 # ============================================================
-# 4️⃣ BENCHMARK — Baseline repeated scans and joins across dashboard branches
+# 4️⃣ BENCHMARK — Baseline recomputes the shared enriched base for every rollup
 # ============================================================
 
-# Baseline: repeated reads and joins across independent actions.
-set_job("4 baseline repeated reads")
-q4_inv = spark.table(table_ref("inventory_transaction")).select(
-    "transaction_type", "reference_id", "quantity", "part_num", "line_id"
-)
+# Baseline: each dashboard rollup rebuilds the same inventory-order-parts join from scratch.
+set_job("4 baseline repeated joins")
 q4_orders = spark.table(table_ref("production_order")).select(
     F.col("production_order.production_order_id").alias("reference_id"),
     F.col("production_order.status").alias("order_status"),
     F.col("production_order.machine_id").alias("machine_id"),
 )
-q4_types = [r["transaction_type"] for r in q4_inv.groupBy("transaction_type").count().orderBy(F.desc("count")).limit(3).collect()]
-q4_before_rows, q4_before_plans = [], []
+q4_parts = spark.table(table_ref("parts")).select("part_num", "part_material")
+
+
+def q4_enriched():
+    # The expensive shared base: scan the large fact and join the two dimensions.
+    return (spark.table(table_ref("inventory_transaction"))
+        .select("transaction_type", "reference_id", "quantity", "part_num")
+        .join(q4_orders, "reference_id", "left")
+        .join(q4_parts, "part_num", "left")
+        .select("transaction_type", "quantity", "order_status", "machine_id", "part_material"))
+
+
+def q4_by_status(base):
+    return base.groupBy("order_status").agg(F.count("*").alias("transactions"), F.sum("quantity").alias("quantity")).orderBy("order_status")
+
+
+def q4_by_material(base):
+    return base.groupBy("part_material").agg(F.count("*").alias("transactions"), F.sum("quantity").alias("quantity")).orderBy("part_material")
+
+
+def q4_by_machine(base):
+    return base.groupBy("machine_id").agg(F.count("*").alias("transactions"), F.sum("quantity").alias("quantity")).orderBy("machine_id")
+
+
 with benchmark_op("Caching / repeated reads", "before", spark):
-    for tx in q4_types:
-        branch = (
-            spark.table(table_ref("inventory_transaction"))
-            .select("transaction_type", "reference_id", "quantity", "part_num", "line_id")
-            .filter(F.col("transaction_type") == tx)
-            .join(q4_orders, "reference_id", "left")
-            .groupBy("transaction_type", "order_status")
-            .agg(F.count("*").alias("transactions"), F.sum("quantity").alias("quantity"))
-        )
-        q4_before_plans.append(explain_string(branch))
-        q4_before_rows.extend(branch.collect())
-display(spark.createDataFrame(q4_before_rows))
+    q4_before_status = q4_by_status(q4_enriched()).collect()
+    q4_before_material = q4_by_material(q4_enriched()).collect()
+    q4_before_machine = q4_by_machine(q4_enriched()).collect()
+
+display(spark.createDataFrame(q4_before_status))
 
 # METADATA ********************
 
@@ -671,14 +689,19 @@ display(spark.createDataFrame(q4_before_rows))
 # 4️⃣ DIAGNOSE — Repeated FileScan operators prove the shared base is recomputed
 # =================================================================================================
 
-# Diagnosis: repeated file scans; Spark UI Jobs tab shows one job per collect.
+# Diagnosis: every rollup re-scans and re-joins the same base; Spark UI Jobs tab shows a job per collect.
+q4_before_plans = [
+    explain_string(q4_by_status(q4_enriched())),
+    explain_string(q4_by_material(q4_enriched())),
+    explain_string(q4_by_machine(q4_enriched())),
+]
 q4_file_scans_before = sum(plan.count("FileScan") for plan in q4_before_plans)
 print(json.dumps({
-    "antiPattern": "Repeated scans of the same inventory/order joined base",
-    "transactionTypes": q4_types,
-    "actions": len(q4_types),
+    "antiPattern": "Recompute the same inventory-order-parts join for every rollup",
+    "dashboards": ["by order_status", "by part_material", "by machine_id"],
+    "rollups": len(q4_before_plans),
     "totalFileScanOperatorsAcrossPlans": q4_file_scans_before,
-    "sparkUIPointer": "Jobs tab: every collect re-runs source preparation",
+    "sparkUIPointer": "Jobs tab: every collect re-runs the full scan + join",
 }, indent=2))
 
 # METADATA ********************
@@ -692,14 +715,20 @@ print(json.dumps({
 
 # ### 🎯 Challenge
 # 
-# Materialize the shared post-join intermediate once. Then branch from the cached DataFrame for the same transaction-type filters and aggregations.
+# Materialize the shared enriched base once, then build all three rollups from the cached DataFrame. The base is reused in full (no per-rollup filter), so caching removes two of the three big-fact scans.
 
+# METADATA ********************
+
+# META {
+# META   "language": "python",
+# META   "language_group": "synapse_pyspark"
+# META }
 
 # CELL ********************
 
-# Challenge starter: this joined base is the cache candidate.
-q4_candidate_base = q4_inv.join(q4_orders, "reference_id", "left")
-print("Cache and materialize this joined base, not the raw source table.")
+# Challenge starter: this enriched join is the cache candidate (reused in full by every rollup).
+q4_candidate_base = q4_enriched()
+print("Cache and materialize this enriched base, then aggregate it three different ways.")
 print(explain_string(q4_candidate_base)[:1200])
 
 # METADATA ********************
@@ -712,24 +741,24 @@ print(explain_string(q4_candidate_base)[:1200])
 # CELL ********************
 
 # ==================================================================================================
-# 4️⃣ FIX — Cache and materialize the joined base once while branch logic stays unchanged
+# 4️⃣ FIX — Cache and materialize the enriched base once while rollup logic stays unchanged
 # ==================================================================================================
 
-# ✅ Solution: cache and materialize the joined base once, then reuse it for all branches.
-set_job("4 solution cache joined base")
-q4_after_rows, q4_after_plans = [], []
+# ✅ Solution: materialize the shared base once, then reuse it for all three rollups.
+set_job("4 solution cache enriched base")
+q4_after_plans = []
 with benchmark_op("Caching / repeated reads", "after", spark):
-    q4_cached_base = q4_candidate_base.persist(StorageLevel.MEMORY_AND_DISK)
+    q4_cached_base = q4_enriched().persist(StorageLevel.MEMORY_AND_DISK)
     q4_cached_base.count()
-    for tx in q4_types:
-        branch = (
-            q4_cached_base.filter(F.col("transaction_type") == tx)
-            .groupBy("transaction_type", "order_status")
-            .agg(F.count("*").alias("transactions"), F.sum("quantity").alias("quantity"))
-        )
-        q4_after_plans.append(explain_string(branch))
-        q4_after_rows.extend(branch.collect())
-display(spark.createDataFrame(q4_after_rows))
+    q4_status_df = q4_by_status(q4_cached_base)
+    q4_material_df = q4_by_material(q4_cached_base)
+    q4_machine_df = q4_by_machine(q4_cached_base)
+    q4_after_plans = [explain_string(q4_status_df), explain_string(q4_material_df), explain_string(q4_machine_df)]
+    q4_after_status = q4_status_df.collect()
+    q4_after_material = q4_material_df.collect()
+    q4_after_machine = q4_machine_df.collect()
+
+display(spark.createDataFrame(q4_after_status))
 q4_cached_base.unpersist()
 
 # METADATA ********************
@@ -745,21 +774,24 @@ q4_cached_base.unpersist()
 # 4️⃣ CHECK-CHANGES — Compare against baseline (results identical)
 # ============================================================
 
-# Validation: same branches and cached-scan evidence.
-def q4_signature(rows):
-    return sorted((r["transaction_type"], r["order_status"], int(r["transactions"]), int(r["quantity"] or 0)) for r in rows)
+# Validation: every rollup matches the baseline and now reads from the in-memory cache.
+def _q4_map(rows, key):
+    return {r[key]: (int(r["transactions"]), int(r["quantity"] or 0)) for r in rows}
 
-q4_before_sig = q4_signature(q4_before_rows)
-q4_after_sig = q4_signature(q4_after_rows)
+same_result = (
+    _q4_map(q4_before_status, "order_status") == _q4_map(q4_after_status, "order_status")
+    and _q4_map(q4_before_material, "part_material") == _q4_map(q4_after_material, "part_material")
+    and _q4_map(q4_before_machine, "machine_id") == _q4_map(q4_after_machine, "machine_id")
+)
 q4_in_memory_scans = sum(plan.count("InMemoryTableScan") for plan in q4_after_plans)
-valid = q4_before_sig == q4_after_sig and q4_in_memory_scans > 0
+valid = same_result and q4_in_memory_scans > 0
 record_result("4 caching / materialization", "passed" if valid else "failed", {
-    "sameBusinessResult": q4_before_sig == q4_after_sig,
+    "sameBusinessResult": same_result,
     "fileScansBefore": q4_file_scans_before,
     "inMemoryScansAfter": q4_in_memory_scans,
-    "cachedBase": "inventory_transaction joined to production_order",
+    "cachedBase": "inventory_transaction joined to production_order and parts",
 })
-assert valid, "Exercise 4 validation failed"
+assert valid, "Exercise 4 validation failed" 
 
 # METADATA ********************
 
