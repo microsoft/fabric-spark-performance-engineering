@@ -51,10 +51,10 @@
 # | Exercise | Scenario | Expected performance signal |
 # |---|---|---|
 # | 1. Join strategies / broadcast | High-volume manufacturing events join to small production-order and parts references. | Results stay identical; `SortMergeJoin` becomes `BroadcastHashJoin` and shuffle/sort overhead is removed for small references. |
-# | 2. Skew handling / salting / AQE skew join | A hot customer dominates the order join key and creates straggler shuffle tasks. | Results stay identical; hot-key partition pressure is split across salt buckets, AQE skew join is enabled, and task times become more balanced. |
-# | 3. Shuffle partitions + executor spill | A KPI rollup is forced through one input partition and 4000 shuffle partitions. | Results stay identical; shuffle partitions are right-sized, AQE coalesces small outputs, and Spark UI spill/tiny-task signals are reduced or eliminated. |
+# | 2. Skew handling / AQE skew join | One machine dominates the event join key and creates a straggler shuffle partition. | Results stay identical; AQE skew join splits the hot partition and task times rebalance, with manual salting as the fallback. |
+# | 3. Shuffle partition sizing (tiny-task storm) | A KPI rollup runs with a large static shuffle-partition count and AQE coalescing off. | Results stay identical; AQE coalesces the near-empty partitions into right-sized tasks, removing the tiny-task storm. |
 # | 4. Caching / materialization | Multiple dashboard branches repeatedly read and join the same inventory/order base. | Results stay identical; the shared joined base is materialized once and reused through cache hits instead of repeated source scans. |
-# | 5. Streaming optimizations | Hourly machine streaming aggregation is stateful without event-time cleanup. | Results stay identical for the batch proxy; streaming state is bounded by `EventTimeWatermark`, with trigger and checkpoint choices documented. |
+# | 5. Streaming state and watermarking | An hourly stateful streaming aggregation runs without an event-time watermark. | Results stay identical; adding a watermark bounds streaming state (`EventTimeWatermark`) so old windows are dropped and memory stays bounded. |
 # | 6. Python UDFs / Native Execution Engine (NEE) | A correct top-customer query uses scalar Python UDFs, slow on the JVM. | Results stay identical; enabling NEE runs the same UDF code natively (no `BatchEvalPython`), removing the Python-boundary slowdown without any code change. |
 
 
@@ -255,32 +255,49 @@ assert valid, "Exercise 1 validation failed"
 
 # ---
 # 
-# ## Exercise 2 — Skew handling / salting / AQE skew join
+# ## Exercise 2 — Skew handling / AQE skew join
 # 
 # ### Context and problem
 # 
-# A customer rollup is correct, but one hot customer dominates the join key. With broadcast disabled and AQE skew handling off, one shuffle partition can become a straggler. Diagnose the skew, then keep the join and aggregation semantics identical while enabling AQE skew support and applying deterministic salting as a manual fallback.
+# A plant throughput rollup joins high-volume manufacturing events to a small machine dimension. One machine ("the busy one") produces orders of magnitude more events than the others — classic data skew on the **join key**. With broadcast disabled the join is a shuffle join, and with AQE skew handling off the hot key lands in a single shuffle partition, so one straggler task dominates the stage. The fix keeps the query identical and lets AQE split the hot partition; manual salting is the fallback when AQE will not trigger.
 
+# METADATA ********************
+
+# META {
+# META   "language": "python",
+# META   "language_group": "synapse_pyspark"
+# META }
 
 # CELL ********************
 
-# Build a skewed customer-order input from read-only source data.
-set_job("2 setup skewed customer join")
-q2_orders = spark.table(table_ref("web_order")).select(
-    F.col("web_order.customer_id").alias("customer_id"),
-    F.col("web_order.order_id").alias("order_id"),
-    F.col("web_order.order_total").alias("order_total"),
+# Setup: materialize a skewed fact and a small machine dimension in the work schema.
+set_job("2 setup skewed plant join")
+
+q2_events = spark.table(table_ref("manufacturing_event")).select(
+    F.col("manufacturing_event.machine_id").alias("machine_id"),
+    F.col("manufacturing_event.event_id").alias("event_id"),
+    F.col("manufacturing_event.mold_temp").alias("mold_temp"),
+    F.col("manufacturing_event.defect_detected").cast("int").alias("defect_detected"),
 )
-q2_hot_customers = [r["customer_id"] for r in q2_orders.groupBy("customer_id").count().orderBy(F.desc("count")).limit(3).collect()]
-q2_hot = q2_orders.filter(F.col("customer_id").isin(q2_hot_customers))
-q2_skewed = q2_orders
-for _ in range(10):
-    q2_skewed = q2_skewed.unionByName(q2_hot)
-q2_customer_dim = q2_skewed.select("customer_id").distinct().withColumn(
-    "customer_segment", F.concat(F.lit("SEG-"), F.pmod(F.xxhash64("customer_id"), F.lit(8)))
+q2_hot_machine = q2_events.groupBy("machine_id").count().orderBy(F.desc("count")).first()["machine_id"]
+print("Hot machine:", q2_hot_machine)
+
+# ~100x extra copies of the hot machine's rows -> one dominant join key.
+q2_dup = 100
+q2_hot = q2_events.filter(F.col("machine_id") == q2_hot_machine)
+q2_skewed = q2_events.unionByName(
+    q2_hot.crossJoin(spark.range(q2_dup).withColumnRenamed("id", "_dup")).drop("_dup")
 )
-print("Hot customers:", q2_hot_customers)
-display(q2_skewed.groupBy("customer_id").count().orderBy(F.desc("count")).limit(10))
+spark.sql(f"DROP TABLE IF EXISTS {table_ref('skewed_events', WORK_SCHEMA)}")
+q2_skewed.write.mode("overwrite").saveAsTable(table_ref("skewed_events", WORK_SCHEMA))
+
+# One row per machine; a small dimension we deliberately shuffle-join (broadcast disabled below).
+q2_machine_dim = (q2_events.select("machine_id").distinct()
+    .withColumn("plant", F.concat(F.lit("PLANT-"), F.substring("machine_id", 6, 3))))
+spark.sql(f"DROP TABLE IF EXISTS {table_ref('machine_dim', WORK_SCHEMA)}")
+q2_machine_dim.write.mode("overwrite").saveAsTable(table_ref("machine_dim", WORK_SCHEMA))
+
+display(spark.sql(f"SELECT machine_id, COUNT(*) AS row_count FROM {table_ref('skewed_events', WORK_SCHEMA)} GROUP BY machine_id ORDER BY row_count DESC LIMIT 10"))
 
 # METADATA ********************
 
@@ -292,11 +309,11 @@ display(q2_skewed.groupBy("customer_id").count().orderBy(F.desc("count")).limit(
 # CELL ********************
 
 # ============================================================
-# 2️⃣ BENCHMARK — Baseline skewed shuffle join with AQE skew handling disabled
+# 2️⃣ BENCHMARK — Baseline skewed shuffle join with AQE skew handling OFF
 # ============================================================
 
-# Baseline: correct skewed join with skew handling and coalesce disabled.
-set_job("2 baseline skewed customer join")
+# Baseline: force a SortMergeJoin (broadcast disabled) with skew handling OFF so the hot key becomes a straggler.
+set_job("2 baseline skewed join")
 remember_conf("spark.sql.adaptive.skewJoin.enabled")
 remember_conf("spark.sql.adaptive.coalescePartitions.enabled")
 remember_conf("spark.sql.autoBroadcastJoinThreshold")
@@ -305,16 +322,24 @@ remember_conf("spark.sql.adaptive.skewJoin.skewedPartitionThresholdInBytes")
 remember_conf("spark.sql.adaptive.advisoryPartitionSizeInBytes")
 spark.conf.set("spark.sql.adaptive.enabled", "true")
 spark.conf.set("spark.sql.adaptive.skewJoin.enabled", "false")
-spark.conf.set("spark.sql.adaptive.coalescePartitions.enabled", "false")
+spark.conf.set("spark.sql.adaptive.coalescePartitions.enabled", "true")
 spark.conf.set("spark.sql.autoBroadcastJoinThreshold", "-1")
 spark.conf.set("spark.sql.shuffle.partitions", "200")
-with benchmark_op("Skew handling / salting", "before", spark):
-    q2_before_df = (q2_skewed.join(q2_customer_dim, "customer_id")
-        .groupBy("customer_id", "customer_segment")
-        .agg(F.count("*").alias("orders"), F.sum("order_total").alias("revenue"))
-        .orderBy(F.desc("orders"), "customer_id"))
+
+
+def q2_plant_rollup():
+    return (spark.table(table_ref("skewed_events", WORK_SCHEMA)).alias("e")
+        .join(spark.table(table_ref("machine_dim", WORK_SCHEMA)).alias("m"), "machine_id")
+        .groupBy("plant")
+        .agg(F.count("*").alias("events"), F.avg("mold_temp").alias("avg_temp"), F.sum(F.col("defect_detected")).alias("defects"))
+        .orderBy("plant"))
+
+
+with benchmark_op("Skew handling / AQE skew join", "before", spark):
+    q2_before_df = q2_plant_rollup()
     q2_before_rows = q2_before_df.collect()
-display(spark.createDataFrame(q2_before_rows).limit(10))
+
+display(spark.createDataFrame(q2_before_rows))
 
 # METADATA ********************
 
@@ -326,20 +351,18 @@ display(spark.createDataFrame(q2_before_rows).limit(10))
 # CELL ********************
 
 # =================================================================================================
-# 2️⃣ DIAGNOSE — Hot-key counts and partition distribution prove skew-driven stragglers
+# 2️⃣ DIAGNOSE — Join-key partition distribution proves one straggler partition
 # =================================================================================================
 
-# Diagnosis: quantify hot-key skew and inspect post-shuffle partition sizes.
-q2_stats = q2_skewed.groupBy("customer_id").count().agg(F.max("count").alias("max_rows"), F.expr("percentile_approx(count, 0.5)").alias("median_rows"), F.avg("count").alias("avg_rows")).collect()[0]
-q2_skew_ratio = float(q2_stats["max_rows"]) / max(float(q2_stats["median_rows"]), 1.0)
+# Diagnosis: hashing the join key into 200 partitions shows one partition holding the hot machine.
+q2_before_plan = explain_string(q2_before_df)
 print(json.dumps({
-    "hotCustomers": q2_hot_customers,
-    "maxRows": int(q2_stats["max_rows"]),
-    "medianRows": int(q2_stats["median_rows"]),
-    "skewRatio": round(q2_skew_ratio, 2),
-    "sparkUIPointer": "Stages > Tasks; sort by Duration and compare shuffle read sizes",
+    "hotMachine": q2_hot_machine,
+    "aqeSkewJoinEnabled": spark.conf.get("spark.sql.adaptive.skewJoin.enabled"),
+    "hasSortMergeJoin": "SortMergeJoin" in q2_before_plan,
+    "sparkUIPointer": "Stages > Tasks: sort by Duration; one straggler task dwarfs the rest",
 }, indent=2))
-q2_skewed.repartition(200, "customer_id").groupBy(spark_partition_id().alias("pid")).count().orderBy(F.desc("count")).show(10, False)
+spark.table(table_ref("skewed_events", WORK_SCHEMA)).repartition(200, "machine_id").groupBy(spark_partition_id().alias("pid")).count().orderBy(F.desc("count")).show(10, False)
 
 # METADATA ********************
 
@@ -352,15 +375,21 @@ q2_skewed.repartition(200, "customer_id").groupBy(spark_partition_id().alias("pi
 
 # ### 🎯 Challenge
 # 
-# Keep the same customer rollup. Enable AQE skew/coalesce settings and use deterministic salting: add `pmod(xxhash64(order_id), N)` to the large side, duplicate the small side across salts, then join on `(customer_id, salt)`.
+# Keep the plant rollup exactly as written. Re-enable `spark.sql.adaptive.skewJoin.enabled` and lower `skewedPartitionThresholdInBytes` / `advisoryPartitionSizeInBytes` so AQE splits the hot partition on this small, highly-compressible lab data. (Manual salting — add `pmod(xxhash64(event_id), N)` to the fact and explode the dimension across the same salts — is the fallback when AQE will not trigger.)
 
+# METADATA ********************
+
+# META {
+# META   "language": "python",
+# META   "language_group": "synapse_pyspark"
+# META }
 
 # CELL ********************
 
-# Challenge starter: inspect how deterministic salt spreads the hot customers.
-salt_buckets = 16
-q2_starter = q2_skewed.withColumn("salt", F.pmod(F.xxhash64("order_id"), F.lit(salt_buckets)))
-display(q2_starter.groupBy("customer_id", "salt").agg(F.count("*").alias("orders")).orderBy(F.desc("orders")).limit(12))
+# Challenge starter: inspect how a deterministic salt would spread the hot machine.
+q2_salt_buckets = 16
+q2_salt_preview = spark.table(table_ref("skewed_events", WORK_SCHEMA)).withColumn("salt", F.pmod(F.xxhash64("event_id"), F.lit(q2_salt_buckets)))
+display(q2_salt_preview.groupBy("machine_id", "salt").count().orderBy(F.desc("count")).limit(12))
 
 # METADATA ********************
 
@@ -372,24 +401,26 @@ display(q2_starter.groupBy("customer_id", "salt").agg(F.count("*").alias("orders
 # CELL ********************
 
 # ==================================================================================================
-# 2️⃣ FIX — Enable AQE skew handling and salt the hot key while rollup logic stays unchanged
+# 2️⃣ FIX — Enable AQE skew join; the query is unchanged
 # ==================================================================================================
 
-# ✅ Solution: AQE settings plus salted join fallback.
-set_job("2 solution salted customer join")
+# ✅ Solution: turn AQE skew handling on and lower the byte thresholds so it fires on small lab data.
+set_job("2 solution AQE skew join")
 spark.conf.set("spark.sql.adaptive.skewJoin.enabled", "true")
 spark.conf.set("spark.sql.adaptive.coalescePartitions.enabled", "true")
+spark.conf.set("spark.sql.autoBroadcastJoinThreshold", "-1")
+spark.conf.set("spark.sql.shuffle.partitions", "200")
 spark.conf.set("spark.sql.adaptive.skewJoin.skewedPartitionThresholdInBytes", "4m")
 spark.conf.set("spark.sql.adaptive.advisoryPartitionSizeInBytes", "8m")
-spark.conf.set("spark.sql.autoBroadcastJoinThreshold", "-1")
-q2_dim_salted = q2_customer_dim.withColumn("salt", F.explode(F.sequence(F.lit(0), F.lit(salt_buckets - 1))))
-with benchmark_op("Skew handling / salting", "after", spark):
-    q2_after_df = (q2_starter.join(q2_dim_salted, ["customer_id", "salt"])
-        .groupBy("customer_id", "customer_segment")
-        .agg(F.count("*").alias("orders"), F.sum("order_total").alias("revenue"))
-        .orderBy(F.desc("orders"), "customer_id"))
+
+with benchmark_op("Skew handling / AQE skew join", "after", spark):
+    q2_after_df = q2_plant_rollup()
     q2_after_rows = q2_after_df.collect()
-display(spark.createDataFrame(q2_after_rows).limit(10))
+
+# Drive the plan from this DataFrame's own action so executedPlan holds the final adaptive plan.
+q2_after_final_plan = q2_after_df._jdf.queryExecution().executedPlan().toString()
+print("AQEShuffleRead skew split present:", "skew" in q2_after_final_plan.lower())
+display(spark.createDataFrame(q2_after_rows))
 
 # METADATA ********************
 
@@ -404,14 +435,13 @@ display(spark.createDataFrame(q2_after_rows).limit(10))
 # 2️⃣ CHECK-CHANGES — Compare against baseline (results identical)
 # ============================================================
 
-# Validation: salted result equals baseline and skew was real.
-q2_before_map = {(r["customer_id"], r["customer_segment"]): (int(r["orders"]), round(float(r["revenue"] or 0), 2)) for r in q2_before_rows}
-q2_after_map = {(r["customer_id"], r["customer_segment"]): (int(r["orders"]), round(float(r["revenue"] or 0), 2)) for r in q2_after_rows}
-valid = q2_before_map == q2_after_map and q2_skew_ratio > 3
-record_result("2 skew handling / salting / AQE", "passed" if valid else "failed", {
+# Validation: same plant rollup, skew now handled by AQE.
+q2_before_map = {r["plant"]: (int(r["events"]), int(r["defects"]), round(float(r["avg_temp"] or 0), 4)) for r in q2_before_rows}
+q2_after_map = {r["plant"]: (int(r["events"]), int(r["defects"]), round(float(r["avg_temp"] or 0), 4)) for r in q2_after_rows}
+valid = q2_before_map == q2_after_map and spark.conf.get("spark.sql.adaptive.skewJoin.enabled") == "true"
+record_result("2 skew handling / AQE skew join", "passed" if valid else "failed", {
     "sameBusinessResult": q2_before_map == q2_after_map,
-    "skewRatio": round(q2_skew_ratio, 2),
-    "saltBuckets": salt_buckets,
+    "hotMachine": q2_hot_machine,
     "aqeSkewJoinEnabled": spark.conf.get("spark.sql.adaptive.skewJoin.enabled"),
 })
 assert valid, "Exercise 2 validation failed"
@@ -433,32 +463,49 @@ restore_conf("spark.sql.adaptive.advisoryPartitionSizeInBytes")
 
 # ---
 # 
-# ## Exercise 3 — Shuffle partitions + executor spill
+# ## Exercise 3 — Shuffle partition sizing (tiny-task storm)
 # 
 # ### Context and problem
 # 
-# A KPI rollup is correct, but execution is forced into bad partitioning. One variant creates huge spill-prone tasks; another creates thousands of tiny tasks. Use Spark UI spill columns, task-duration spread, `explain()`, and `spark_partition_id()` to diagnose, then right-size partitions and re-enable AQE coalescing.
+# A plant KPI rollup is correct, but someone set `spark.sql.shuffle.partitions` to a large static value "to be safe" and disabled AQE coalescing. On a small result the aggregation produces thousands of nearly-empty shuffle partitions — each paying task-launch overhead — so most of the wall-clock is scheduling, not compute. The fix keeps the query identical and lets AQE coalesce the tiny partitions into right-sized tasks.
 
+# METADATA ********************
+
+# META {
+# META   "language": "python",
+# META   "language_group": "synapse_pyspark"
+# META }
 
 # CELL ********************
 
 # ============================================================
-# 3️⃣ BENCHMARK — Baseline poor partition sizing with spill-prone and tiny-task signals
+# 3️⃣ BENCHMARK — Baseline over-partitioned shuffle with AQE coalesce OFF
 # ============================================================
 
-# Baseline: correct KPI query with a single input partition and 4000 shuffle partitions.
-set_job("3 baseline poor shuffle partitioning")
+# Baseline: a large static shuffle-partition count with AQE coalescing disabled -> a tiny-task storm.
+set_job("3 baseline over-partitioned shuffle")
 remember_conf("spark.sql.shuffle.partitions")
 remember_conf("spark.sql.adaptive.coalescePartitions.enabled")
-spark.conf.set("spark.sql.shuffle.partitions", "4000")
+spark.conf.set("spark.sql.shuffle.partitions", "1000")
 spark.conf.set("spark.sql.adaptive.coalescePartitions.enabled", "false")
-q3_events = spark.table(table_ref("manufacturing_event")).selectExpr("manufacturing_event.*").select("machine_id", "timestamp", "cycle_time_ms", "defect_detected")
-q3_before_input = q3_events.repartition(1)
-with benchmark_op("Shuffle partitions + spill", "before", spark):
-    q3_before_df = (q3_before_input.groupBy("machine_id")
-        .agg(F.count("*").alias("events"), F.avg("cycle_time_ms").alias("avg_cycle_ms"), F.sum(F.col("defect_detected").cast("int")).alias("defects"))
+
+q3_events = spark.table(table_ref("manufacturing_event")).select(
+    F.col("manufacturing_event.machine_id").alias("machine_id"),
+    F.col("manufacturing_event.cycle_time_ms").alias("cycle_time_ms"),
+    F.col("manufacturing_event.defect_detected").cast("int").alias("defect_detected"),
+)
+
+
+def q3_machine_rollup():
+    return (q3_events.groupBy("machine_id")
+        .agg(F.count("*").alias("events"), F.avg("cycle_time_ms").alias("avg_cycle_ms"), F.sum(F.col("defect_detected")).alias("defects"))
         .orderBy(F.desc("events"), "machine_id"))
+
+
+with benchmark_op("Shuffle partition sizing", "before", spark):
+    q3_before_df = q3_machine_rollup()
     q3_before_rows = q3_before_df.collect()
+
 display(spark.createDataFrame(q3_before_rows).limit(10))
 
 # METADATA ********************
@@ -471,19 +518,17 @@ display(spark.createDataFrame(q3_before_rows).limit(10))
 # CELL ********************
 
 # =================================================================================================
-# 3️⃣ DIAGNOSE — Plan, partition counts, and Spark UI spill columns prove bad sizing
+# 3️⃣ DIAGNOSE — Static partition count creates thousands of near-empty tasks
 # =================================================================================================
 
-# Diagnosis: plan, partition distribution, and Spark UI task/spill pointer.
+# Diagnosis: confirm the static shuffle-partition count and that AQE coalescing is off.
 q3_before_plan = explain_string(q3_before_df)
-print(q3_before_plan)
 print(json.dumps({
     "shufflePartitions": spark.conf.get("spark.sql.shuffle.partitions"),
     "aqeCoalesceEnabled": spark.conf.get("spark.sql.adaptive.coalescePartitions.enabled"),
     "hasExchange": "Exchange" in q3_before_plan,
-    "sparkUIPointer": "Stages > Tasks: inspect Duration, Spill (Memory), Spill (Disk), and task count",
+    "sparkUIPointer": "Stages: thousands of tasks, most processing 0 rows",
 }, indent=2))
-q3_before_input.groupBy(spark_partition_id().alias("pid")).count().orderBy(F.desc("count")).show(10, False)
 
 # METADATA ********************
 
@@ -496,15 +541,22 @@ q3_before_input.groupBy(spark_partition_id().alias("pid")).count().orderBy(F.des
 
 # ### 🎯 Challenge
 # 
-# Preserve the KPI result but change only execution: remove the single-partition collapse, choose a reasonable shuffle count, repartition by `machine_id`, and turn AQE coalescing back on.
+# Keep the KPI query exactly as written and change only execution: re-enable `spark.sql.adaptive.coalescePartitions.enabled` so AQE merges the near-empty shuffle partitions into right-sized chunks. No code change is required.
 
+# METADATA ********************
+
+# META {
+# META   "language": "python",
+# META   "language_group": "synapse_pyspark"
+# META }
 
 # CELL ********************
 
-# Challenge starter: inspect distribution after key-based repartitioning.
-q3_target_partitions = 96
-q3_starter_input = q3_events.repartition(q3_target_partitions, "machine_id")
-q3_starter_input.groupBy(spark_partition_id().alias("pid")).count().orderBy(F.desc("count")).show(10, False)
+# Challenge starter: check the current execution settings before fixing them.
+print(json.dumps({
+    "shufflePartitions": spark.conf.get("spark.sql.shuffle.partitions"),
+    "aqeCoalesceEnabled": spark.conf.get("spark.sql.adaptive.coalescePartitions.enabled"),
+}, indent=2))
 
 # METADATA ********************
 
@@ -516,19 +568,18 @@ q3_starter_input.groupBy(spark_partition_id().alias("pid")).count().orderBy(F.de
 # CELL ********************
 
 # ==================================================================================================
-# 3️⃣ FIX — Repartition by machine and right-size shuffles while KPI logic stays unchanged
+# 3️⃣ FIX — Re-enable AQE coalescing; the query is unchanged
 # ==================================================================================================
 
-# ✅ Solution: right-size shuffle partitions and let AQE coalesce tiny outputs.
-set_job("3 solution right-sized shuffle")
-spark.conf.set("spark.sql.shuffle.partitions", str(q3_target_partitions))
+# ✅ Solution: let AQE coalesce the over-partitioned shuffle into right-sized tasks.
+set_job("3 solution AQE coalesce")
+spark.conf.set("spark.sql.adaptive.enabled", "true")
 spark.conf.set("spark.sql.adaptive.coalescePartitions.enabled", "true")
-q3_after_input = q3_events.repartition(q3_target_partitions, "machine_id")
-with benchmark_op("Shuffle partitions + spill", "after", spark):
-    q3_after_df = (q3_after_input.groupBy("machine_id")
-        .agg(F.count("*").alias("events"), F.avg("cycle_time_ms").alias("avg_cycle_ms"), F.sum(F.col("defect_detected").cast("int")).alias("defects"))
-        .orderBy(F.desc("events"), "machine_id"))
+
+with benchmark_op("Shuffle partition sizing", "after", spark):
+    q3_after_df = q3_machine_rollup()
     q3_after_rows = q3_after_df.collect()
+
 display(spark.createDataFrame(q3_after_rows).limit(10))
 
 # METADATA ********************
@@ -544,14 +595,14 @@ display(spark.createDataFrame(q3_after_rows).limit(10))
 # 3️⃣ CHECK-CHANGES — Compare against baseline (results identical)
 # ============================================================
 
-# Validation: same KPI result with healthier execution settings.
+# Validation: same KPI result with AQE coalescing the tiny partitions.
 q3_before_map = {r["machine_id"]: (int(r["events"]), int(r["defects"]), round(float(r["avg_cycle_ms"] or 0), 4)) for r in q3_before_rows}
 q3_after_map = {r["machine_id"]: (int(r["events"]), int(r["defects"]), round(float(r["avg_cycle_ms"] or 0), 4)) for r in q3_after_rows}
 valid = q3_before_map == q3_after_map and spark.conf.get("spark.sql.adaptive.coalescePartitions.enabled") == "true"
-record_result("3 shuffle partitions + executor spill", "passed" if valid else "failed", {
+record_result("3 shuffle partition sizing (tiny-task storm)", "passed" if valid else "failed", {
     "sameBusinessResult": q3_before_map == q3_after_map,
-    "beforeShufflePartitions": "4000",
-    "afterShufflePartitions": spark.conf.get("spark.sql.shuffle.partitions"),
+    "staticShufflePartitions": "1000",
+    "aqeCoalesceEnabled": spark.conf.get("spark.sql.adaptive.coalescePartitions.enabled"),
 })
 assert valid, "Exercise 3 validation failed"
 restore_conf("spark.sql.shuffle.partitions")
@@ -721,36 +772,60 @@ assert valid, "Exercise 4 validation failed"
 
 # ---
 # 
-# ## Exercise 5 — Streaming optimizations
+# ## Exercise 5 — Streaming state and watermarking
 # 
 # ### Context and problem
 # 
-# A streaming aggregation over manufacturing events groups by one-hour event-time windows and machine. The baseline is stateful but has no event-time watermark, so state cleanup is unbounded. The optimized plan adds watermarking, a deliberate trigger interval, and state-store settings. This notebook builds plans safely without starting a long-running stream.
+# An hourly machine defect aggregation is a correct **stateful** streaming query, but it has no event-time watermark, so Spark keeps window state forever and memory grows unbounded. Both runs use `trigger(availableNow=True)`, which processes the currently-available data in micro-batches and then stops, so the notebook stays bounded. The fix adds a two-hour watermark so Spark can drop state for windows older than `max_event_time - 2 hours`.
 
+# METADATA ********************
+
+# META {
+# META   "language": "python",
+# META   "language_group": "synapse_pyspark"
+# META }
 
 # CELL ********************
 
 # ============================================================
-# 5️⃣ BENCHMARK — Baseline streaming aggregation plan without watermark
+# 5️⃣ BENCHMARK — Stateful streaming aggregation WITHOUT a watermark
 # ============================================================
 
-# Baseline: streaming plan without watermark plus a batch proxy benchmark for the same aggregation shape.
-set_job("5 baseline streaming plan")
-q5_batch = spark.table(table_ref("manufacturing_event")).select(
-    F.to_timestamp(F.col("manufacturing_event.timestamp")).alias("event_ts"),
-    F.col("manufacturing_event.machine_id").alias("machine_id"),
-    F.col("manufacturing_event.defect_detected").cast("int").alias("is_defect"),
-)
-q5_before_batch_df = q5_batch.groupBy(F.window("event_ts", "1 hour"), "machine_id").agg(F.count("*").alias("events"), F.sum("is_defect").alias("defects"))
-with benchmark_op("Streaming aggregation tuning", "before", spark):
-    q5_before_sample_df = q5_before_batch_df.orderBy("machine_id", "window").limit(20)
-    q5_before_batch_rows = q5_before_sample_df.collect()
-q5_stream_before_df = (spark.readStream.table(table_ref("manufacturing_event"))
-    .select(F.to_timestamp(F.col("manufacturing_event.timestamp")).alias("event_ts"), F.col("manufacturing_event.machine_id").alias("machine_id"), F.col("manufacturing_event.defect_detected").cast("int").alias("is_defect"))
+# Baseline: stateful windowed aggregation with no watermark -> unbounded state growth.
+set_job("5 baseline streaming no watermark")
+
+
+def q5_stream_source():
+    return (spark.readStream.option("maxFilesPerTrigger", 15).table(table_ref("manufacturing_event"))
+        .select(
+            F.to_timestamp(F.col("manufacturing_event.timestamp")).alias("event_ts"),
+            F.col("manufacturing_event.machine_id").alias("machine_id"),
+            F.col("manufacturing_event.defect_detected").cast("int").alias("is_defect"),
+        ))
+
+
+def q5_state_metrics(q):
+    lp = q.lastProgress or {}
+    ops = lp.get("stateOperators") or [{}]
+    op = ops[0] if ops else {}
+    return (op.get("memoryUsedBytes"), op.get("numRowsTotal"), op.get("numRowsDroppedByWatermark"))
+
+
+q5_before_stream = (q5_stream_source()
     .groupBy(F.window("event_ts", "1 hour"), "machine_id")
     .agg(F.count("*").alias("events"), F.sum("is_defect").alias("defects")))
-q5_before_plan = explain_string(q5_stream_before_df)
-print(q5_before_plan)
+q5_before_plan = explain_string(q5_before_stream)
+
+q5_before_ckpt = f"Files/{WORK_SCHEMA}/checkpoints/stream_before_{spark.sparkContext.applicationId}"
+with benchmark_op("Streaming state / watermark", "before", spark):
+    q5_before_query = (q5_before_stream.writeStream
+        .trigger(availableNow=True)
+        .option("checkpointLocation", q5_before_ckpt)
+        .format("memory").queryName("m3_defects_before").outputMode("update").start())
+    q5_before_query.awaitTermination()
+
+q5_before_mem, q5_before_rows_total, q5_before_dropped = q5_state_metrics(q5_before_query)
+print(f"State memory (no watermark): {(q5_before_mem or 0) / (1024 * 1024):.2f} MB | rowsTotal: {q5_before_rows_total} | droppedByWatermark: {q5_before_dropped}")
 
 # METADATA ********************
 
@@ -762,15 +837,15 @@ print(q5_before_plan)
 # CELL ********************
 
 # =================================================================================================
-# 5️⃣ DIAGNOSE — Streaming plan proves stateful aggregation has no watermark bound
+# 5️⃣ DIAGNOSE — No EventTimeWatermark, so window state is never dropped
 # =================================================================================================
 
-# Diagnosis: stateful streaming aggregation has no watermark.
+# Diagnosis: the streaming plan has no watermark bound on the stateful aggregation.
 print(json.dumps({
-    "isStreaming": q5_stream_before_df.isStreaming,
+    "isStreaming": q5_before_stream.isStreaming,
     "hasWatermark": "EventTimeWatermark" in q5_before_plan,
     "statefulAggregation": "Aggregate" in q5_before_plan,
-    "sparkUIPointer": "Streaming progress > stateOperators: rowsTotal, memoryUsedBytes, numRowsDroppedByWatermark",
+    "sparkUIPointer": "Structured Streaming > stateOperators: memoryUsedBytes, numRowsTotal, numRowsDroppedByWatermark",
 }, indent=2))
 
 # METADATA ********************
@@ -784,16 +859,21 @@ print(json.dumps({
 
 # ### 🎯 Challenge
 # 
-# Add a two-hour watermark on `event_ts`, choose a processing-time trigger such as `1 minute`, and plan a durable checkpoint path before starting a real `writeStream`.
+# Keep the same hourly aggregation. Add `.withWatermark("event_ts", "2 hours")` before the `groupBy` so Spark can drop state for windows older than `max_event_time - 2 hours`. Choose a processing-time trigger and a durable checkpoint path for a real deployment.
 
+# METADATA ********************
+
+# META {
+# META   "language": "python",
+# META   "language_group": "synapse_pyspark"
+# META }
 
 # CELL ********************
 
-# Challenge starter: select runtime choices for a real streaming write.
+# Challenge starter: document the runtime choices for a real streaming write.
 q5_watermark_delay = "2 hours"
 q5_trigger_interval = "1 minute"
-q5_checkpoint_path = f"Files/{WORK_SCHEMA}/checkpoints/manufacturing_event_hourly"
-print(json.dumps({"watermarkDelay": q5_watermark_delay, "triggerInterval": q5_trigger_interval, "checkpointPathForRealRun": q5_checkpoint_path}, indent=2))
+print(json.dumps({"watermarkDelay": q5_watermark_delay, "triggerIntervalForRealRun": q5_trigger_interval}, indent=2))
 
 # METADATA ********************
 
@@ -805,24 +885,29 @@ print(json.dumps({"watermarkDelay": q5_watermark_delay, "triggerInterval": q5_tr
 # CELL ********************
 
 # ==================================================================================================
-# 5️⃣ FIX — Add event-time watermark and runtime settings while aggregation logic stays unchanged
+# 5️⃣ FIX — Add a two-hour event-time watermark; the aggregation is unchanged
 # ==================================================================================================
 
-# ✅ Solution: add watermark and state-aware settings; batch proxy result remains the same.
+# ✅ Solution: bound state with a watermark so old windows are cleaned up.
 set_job("5 solution streaming watermark")
-spark.conf.set("spark.sql.streaming.statefulOperator.checkCorrectness.enabled", "true")
-q5_after_batch_df = q5_batch.groupBy(F.window("event_ts", "1 hour"), "machine_id").agg(F.count("*").alias("events"), F.sum("is_defect").alias("defects"))
-with benchmark_op("Streaming aggregation tuning", "after", spark):
-    q5_after_sample_df = q5_after_batch_df.orderBy("machine_id", "window").limit(20)
-    q5_after_batch_rows = q5_after_sample_df.collect()
-q5_stream_after_df = (spark.readStream.table(table_ref("manufacturing_event"))
-    .select(F.to_timestamp(F.col("manufacturing_event.timestamp")).alias("event_ts"), F.col("manufacturing_event.machine_id").alias("machine_id"), F.col("manufacturing_event.defect_detected").cast("int").alias("is_defect"))
+
+q5_after_stream = (q5_stream_source()
     .withWatermark("event_ts", q5_watermark_delay)
     .groupBy(F.window("event_ts", "1 hour"), "machine_id")
     .agg(F.count("*").alias("events"), F.sum("is_defect").alias("defects")))
-q5_after_plan = explain_string(q5_stream_after_df)
-print(q5_after_plan)
-print("For a real stream: .trigger(processingTime=q5_trigger_interval) and .option('checkpointLocation', q5_checkpoint_path).")
+q5_after_plan = explain_string(q5_after_stream)
+
+q5_after_ckpt = f"Files/{WORK_SCHEMA}/checkpoints/stream_after_{spark.sparkContext.applicationId}"
+with benchmark_op("Streaming state / watermark", "after", spark):
+    q5_after_query = (q5_after_stream.writeStream
+        .trigger(availableNow=True)
+        .option("checkpointLocation", q5_after_ckpt)
+        .format("memory").queryName("m3_defects_after").outputMode("update").start())
+    q5_after_query.awaitTermination()
+
+q5_after_mem, q5_after_rows_total, q5_after_dropped = q5_state_metrics(q5_after_query)
+print(f"State memory (2h watermark): {(q5_after_mem or 0) / (1024 * 1024):.2f} MB | rowsTotal: {q5_after_rows_total} | droppedByWatermark: {q5_after_dropped}")
+print(q5_after_plan[:1200])
 
 # METADATA ********************
 
@@ -834,21 +919,20 @@ print("For a real stream: .trigger(processingTime=q5_trigger_interval) and .opti
 # CELL ********************
 
 # ============================================================
-# 5️⃣ CHECK-CHANGES — Compare against baseline (results identical)
+# 5️⃣ CHECK-CHANGES — Watermark now bounds streaming state
 # ============================================================
 
-# Validation: streaming plan is bounded by watermark and batch proxy samples match.
-q5_before_sig = [(r["window"].start, r["window"].end, r["machine_id"], int(r["events"]), int(r["defects"] or 0)) for r in q5_before_batch_rows]
-q5_after_sig = [(r["window"].start, r["window"].end, r["machine_id"], int(r["events"]), int(r["defects"] or 0)) for r in q5_after_batch_rows]
-valid = q5_stream_before_df.isStreaming and q5_stream_after_df.isStreaming and "EventTimeWatermark" not in q5_before_plan and "EventTimeWatermark" in q5_after_plan and q5_before_sig == q5_after_sig
-record_result("5 streaming optimizations", "passed" if valid else "failed", {
+# Validation: the fixed streaming plan has an EventTimeWatermark; the baseline did not.
+valid = (q5_before_stream.isStreaming and q5_after_stream.isStreaming
+    and "EventTimeWatermark" not in q5_before_plan and "EventTimeWatermark" in q5_after_plan)
+record_result("5 streaming state / watermark", "passed" if valid else "failed", {
     "beforeHasWatermark": "EventTimeWatermark" in q5_before_plan,
     "afterHasWatermark": "EventTimeWatermark" in q5_after_plan,
-    "triggerIntervalRecommendation": q5_trigger_interval,
-    "sameBatchProxySample": q5_before_sig == q5_after_sig,
+    "beforeStateMemoryMB": round((q5_before_mem or 0) / (1024 * 1024), 2),
+    "afterStateMemoryMB": round((q5_after_mem or 0) / (1024 * 1024), 2),
+    "afterRowsDroppedByWatermark": q5_after_dropped,
 })
 assert valid, "Exercise 5 validation failed"
-restore_conf("spark.sql.streaming.statefulOperator.checkCorrectness.enabled")
 
 # METADATA ********************
 
@@ -1032,10 +1116,10 @@ restore_conf("spark.native.enabled")
 # You tuned execution without changing source tables or business logic:
 # 
 # 1. **Join strategy / broadcast** — replaced sort-merge shuffle with broadcast hash joins for small references.
-# 2. **Skew handling / salting / AQE** — diagnosed hot-key stragglers and split the hot key across salt buckets.
-# 3. **Shuffle partitions + executor spill** — right-sized partitions and re-enabled AQE coalescing to avoid huge spilling tasks and tiny-task storms.
+# 2. **Skew handling / AQE skew join** — diagnosed a hot-key straggler and let AQE split the hot partition (salting as the manual fallback).
+# 3. **Shuffle partition sizing** — re-enabled AQE coalescing to merge a static over-partitioned shuffle into right-sized tasks.
 # 4. **Caching / materialization** — cached the reused prepared branch after expensive joins/aggregation.
-# 5. **Streaming optimizations** — bounded state with watermarking and documented trigger/checkpoint choices.
+# 5. **Streaming state and watermarking** — added an event-time watermark so Spark drops old window state and memory stays bounded.
 # 6. **Python UDFs / NEE** — enabled the Native Execution Engine so the same Python-UDF code runs natively, with no rewrite.
 
 
