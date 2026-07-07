@@ -2,7 +2,8 @@
   "$schema": "https://developer.microsoft.com/json-schemas/fabric/gitIntegration/platformProperties/2.0.0/schema.json",
   "metadata": {
     "type": "Notebook",
-    "displayName": "01-optimizing-code"
+    "displayName": "01_optimizing-code",
+    "description": "Learn how to optimize common performance issues where writing code differently addresses the root cause."
   },
   "config": {
     "version": "2.0",

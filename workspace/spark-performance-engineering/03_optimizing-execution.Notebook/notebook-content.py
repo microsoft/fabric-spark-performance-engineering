@@ -281,13 +281,6 @@ assert valid, "Exercise 1 validation failed"
 # 
 # A plant throughput rollup joins high-volume manufacturing events to a small machine dimension. One machine ("the busy one") produces orders of magnitude more events than the others — classic data skew on the **join key**. With broadcast disabled the join is a shuffle join, and with AQE skew handling off the hot key lands in a single shuffle partition, so one straggler task dominates the stage. The fix keeps the query identical and lets AQE split the hot partition; manual salting is the fallback when AQE will not trigger.
 
-# METADATA ********************
-
-# META {
-# META   "language": "python",
-# META   "language_group": "synapse_pyspark"
-# META }
-
 # CELL ********************
 
 # Setup: materialize a skewed fact and a small machine dimension in the work schema.
@@ -397,13 +390,6 @@ spark.table(table_ref("skewed_events", WORK_SCHEMA)).repartition(200, "machine_i
 # 
 # Keep the plant rollup exactly as written. Re-enable `spark.sql.adaptive.skewJoin.enabled` and lower `skewedPartitionThresholdInBytes` / `advisoryPartitionSizeInBytes` so AQE splits the hot partition on this small, highly-compressible lab data. (Manual salting — add `pmod(xxhash64(event_id), N)` to the fact and explode the dimension across the same salts — is the fallback when AQE will not trigger.)
 
-# METADATA ********************
-
-# META {
-# META   "language": "python",
-# META   "language_group": "synapse_pyspark"
-# META }
-
 # CELL ********************
 
 # Challenge starter: inspect how a deterministic salt would spread the hot machine.
@@ -489,13 +475,6 @@ restore_conf("spark.sql.adaptive.advisoryPartitionSizeInBytes")
 # 
 # A plant KPI rollup is correct, but someone set `spark.sql.shuffle.partitions` to a large static value "to be safe" and disabled AQE coalescing. On a small result the aggregation produces thousands of nearly-empty shuffle partitions — each paying task-launch overhead — so most of the wall-clock is scheduling, not compute. The fix keeps the query identical and lets AQE coalesce the tiny partitions into right-sized tasks.
 
-# METADATA ********************
-
-# META {
-# META   "language": "python",
-# META   "language_group": "synapse_pyspark"
-# META }
-
 # CELL ********************
 
 # ============================================================
@@ -562,13 +541,6 @@ print(json.dumps({
 # ### 🎯 Challenge
 # 
 # Keep the KPI query exactly as written and change only execution: re-enable `spark.sql.adaptive.coalescePartitions.enabled` so AQE merges the near-empty shuffle partitions into right-sized chunks. No code change is required.
-
-# METADATA ********************
-
-# META {
-# META   "language": "python",
-# META   "language_group": "synapse_pyspark"
-# META }
 
 # CELL ********************
 
@@ -644,13 +616,6 @@ restore_conf("spark.sql.adaptive.coalescePartitions.enabled")
 # ### Context and problem
 # 
 # Three dashboards — by order status, by part material, and by machine — are all built from the **same** expensive intermediate: inventory transactions joined to production orders and parts, then aggregated (a full scan of the large fact plus a shuffle). The baseline recomputes that scan-join-shuffle once per dashboard, so the costly shuffle runs three times. The fix materializes the aggregated base once and reuses it; each dashboard then does a cheap additive roll-up with identical results.
-
-# METADATA ********************
-
-# META {
-# META   "language": "python",
-# META   "language_group": "synapse_pyspark"
-# META }
 
 # CELL ********************
 
@@ -738,13 +703,6 @@ print(json.dumps({
 # ### 🎯 Challenge
 # 
 # Materialize the expensive aggregated base once, then build all three dashboards from the cached DataFrame with cheap additive roll-ups (sum the pre-aggregated counts and quantities). Because the cached result is small, caching runs the costly shuffle a single time instead of three.
-
-# METADATA ********************
-
-# META {
-# META   "language": "python",
-# META   "language_group": "synapse_pyspark"
-# META }
 
 # CELL ********************
 
@@ -992,6 +950,27 @@ restore_conf("spark.native.enabled")
 
 # ---
 # 
+# # 🏆 Performance Impact by Exercise
+# 
+# Execute the below to see the full impact across every exercise.
+# 
+
+
+# CELL ********************
+
+print_benchmark_summary()
+
+# METADATA ********************
+
+# META {
+# META   "language": "python",
+# META   "language_group": "synapse_pyspark"
+# META }
+
+# MARKDOWN ********************
+
+# ---
+# 
 # ## Summary — Optimizing how Spark runs
 # 
 # You tuned execution without changing source tables or business logic:
@@ -1002,23 +981,3 @@ restore_conf("spark.native.enabled")
 # 4. **Caching / materialization** — materialized an expensive aggregated base once and reused it across dashboards, running the costly shuffle a single time.
 # 5. **Python UDFs / NEE** — enabled the Native Execution Engine so the same Python-UDF code runs natively, with no rewrite.
 
-
-# CELL ********************
-
-# Final validation summary and config cleanup
-failed = [r for r in results if r["status"] != "passed"]
-summary = {"sparkApplicationId": spark.sparkContext.applicationId, "resultCount": len(results), "failedCount": len(failed), "results": results}
-print("OPT_EXEC_FINAL_SUMMARY_START")
-print(json.dumps(summary, indent=2, sort_keys=True, default=str))
-print("OPT_EXEC_FINAL_SUMMARY_END")
-for key in list(_ORIGINAL_CONF.keys()):
-    restore_conf(key)
-assert len(results) == 5, f"Expected 5 exercise validations, got {len(results)}"
-assert not failed, f"Failed validations: {failed}"
-
-# METADATA ********************
-
-# META {
-# META   "language": "python",
-# META   "language_group": "synapse_pyspark"
-# META }

@@ -75,11 +75,9 @@
 # 1. Go to the [source_to_bronze](https://app.powerbi.com/groups/$workspaceId/sparkjobdefinitions/$sparkJobDefinitionId?experience=fabric-developer) Spark Job Definition
 # 1. Click **Run** (top header ribbon). _Note: only click **Run** once. It takes ~5 seconds to show up as active in the run history._
 # 
-# > 🔁 **Re-run anytime.** The job is incremental — run it multiple times to generate larger lab data. By default it runs for 30 minutes and then stops. By then most Delta tables will have ~150 commits.
+# > 🔁 **Re-run anytime.** The job is incremental — run it multiple times to generate larger lab data. By default it runs for 30 minutes and then stops.
 # 
-# > ⚠️ **Don't run the `source_to_bronze_optimized` job** yet. That variant is used in Module 2.
-# 
-# Move on to Module 1 once the Spark Job Definition run shows as **Succeeded**.
+# Move on to Module 1 once the Spark Job Definition run shows as **Succeeded**. It will run for approximately 30 minutes to generate tables which enough commits that can be used to illustrate real-world performance challenges.
 
 
 # MARKDOWN ********************
@@ -94,9 +92,9 @@
 # 
 # | Module | Notebook | Fix lever | What you'll learn |
 # |--------|----------|-----------|--------------------|
-# | **1 — Optimizing Code** | `01-optimizing-code` | Rewrite the query | Reading the Spark UI / query plans / Delta metadata, then fixing code-level anti-patterns: predicate pushdown, Python UDFs vs native / NEE, driver `collect()`/`toPandas()` & OOM, cartesian / missing join keys |
-# | **2 — Optimizing Delta Tables** | `02-optimizing-delta-tables` | Change the data at rest | OPTIMIZE / compaction, Optimize Write, liquid clustering & data-skipping stats, deletion vectors, data types, partitioning strategy, storage-regression auditing (`DESCRIBE HISTORY`) |
-# | **3 — Optimizing Execution** | `03-optimizing-execution` | Tune how Spark runs it | Join strategies & broadcast, AQE & skew / salting, shuffle-partition sizing & spill, caching / materialization, streaming |
+# | **1 — Optimizing Code** | `01_optimizing-code` | Rewrite the query | Reading the Spark UI / query plans / Delta metadata, then fixing code-level anti-patterns: predicate pushdown, Python UDFs vs native / NEE, driver `collect()`/`toPandas()` & OOM, cartesian / missing join keys |
+# | **2 — Optimizing Tables** | `02_optimizing-tables` | Change the data at rest | OPTIMIZE / compaction, Optimize Write, liquid clustering & data-skipping stats, deletion vectors, data types, partitioning strategy, storage-regression auditing (`DESCRIBE HISTORY`) |
+# | **3 — Optimizing Execution** | `03_optimizing-execution` | Tune how Spark runs it | Join strategies & broadcast, AQE & skew / salting, shuffle-partition sizing & spill, caching / materialization, streaming |
 # 
 # **How Modules 1 and 3 differ:** Module 1 is when the *query is written badly* (fix = edit the
 # code). Module 3 is when the code and tables are fine but Spark *executes* it sub-optimally
@@ -108,3 +106,4 @@
 # | Notebook | What it provides |
 # |----------|------------------|
 # | `_benchmark_utils` | `df.benchmark(scenario, state)` / `benchmark_op(scenario, state, spark)` timers and `get_table_metrics()` / `show_metrics()` helpers used across modules. Don't run it standalone — each module `%run`s it. |
+

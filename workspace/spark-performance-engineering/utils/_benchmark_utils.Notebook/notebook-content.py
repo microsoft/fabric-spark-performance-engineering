@@ -258,9 +258,18 @@ def require_tables(expected, schema: str = "bronze"):
 
 
 def remember_conf(key: str) -> None:
-    """Snapshot a Spark conf value once so it can be restored later."""
+    """Snapshot a Spark conf value once so it can be restored later.
+
+    Capture the *effective* value (including Spark/Fabric defaults) rather than
+    ``get(key, None)``: some confs (e.g. spark.sql.shuffle.partitions) are not
+    explicit session entries, so a ``None`` snapshot would make restore_conf unset
+    the key instead of re-applying the real default, leaking a prior override.
+    """
     if key not in _ORIGINAL_CONF:
-        _ORIGINAL_CONF[key] = spark.conf.get(key, None)
+        try:
+            _ORIGINAL_CONF[key] = spark.conf.get(key)
+        except Exception:
+            _ORIGINAL_CONF[key] = None
 
 
 def restore_conf(key: str) -> None:
