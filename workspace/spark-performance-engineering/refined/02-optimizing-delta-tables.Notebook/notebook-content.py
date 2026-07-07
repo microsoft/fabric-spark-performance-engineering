@@ -49,6 +49,7 @@
 # | 5. Data-type optimization | Rewrite `inventory_transaction` with numeric `color_id` stored as `int` instead of `string`. | Table size decreases after right-sizing types; numeric stats support cleaner filtered scans. |
 # | 6. Partitioning strategy | Compare no partitioning, high-cardinality `part_num`, and date partitioning. | Avoid over-partitioning; balanced file sizes and input-file counts align with time-range and point filters. |
 # | 7. Delta storage-regression audit | Use history and properties to find an append that regressed `inventory_transaction_audit` layout. | Isolate the commit/version that regressed file layout via `DESCRIBE HISTORY`, then verify file count and pruning recover. |
+# | 8. Semi-structured storage: `VARIANT` vs JSON string | Store `web_order` payloads as a JSON string column, then as native `VARIANT`. | Field extraction stops re-parsing JSON text; VARIANT stores nested data in compact binary form with smaller/comparable table size. |
 
 # CELL ********************
 
@@ -1122,6 +1123,155 @@ print(f"Files after remediation: {metrics_7_remediated['num_files']:,}")
 
 print("Optimization properties after remediation:")
 display(spark.sql(f"SHOW TBLPROPERTIES {EX7_TABLE}").filter("key LIKE 'delta.autoOptimize.%' OR key = 'delta.targetFileSize'"))
+
+# METADATA ********************
+
+# META {
+# META   "language": "python",
+# META   "language_group": "synapse_pyspark"
+# META }
+
+# MARKDOWN ********************
+
+# ---
+# 
+# # Exercise 8 — Semi-structured storage: `VARIANT` vs JSON string
+# 
+# **Table:** `web_order` derivative.
+# 
+# **Problem:** Semi-structured payloads (nested orders, event attributes) are often landed as a JSON **string** column. Every query then re-parses the text with `get_json_object` / `from_json`, and the raw JSON text stores repeated field names on every row.
+# 
+# **Fix:** Store the payload as the native `VARIANT` type via `parse_json`. VARIANT keeps the data in a compact, binary-encoded form and lets Spark extract fields with `variant_get` — no per-query text parsing — while remaining schema-flexible.
+# 
+# > NOTE: `VARIANT` requires a Fabric runtime that supports it (Spark 4.x / Delta with the Variant type). This is intentionally the **last** exercise so that, on a runtime without VARIANT, the earlier exercises still complete.
+
+# METADATA ********************
+
+# META {
+# META   "language": "python",
+# META   "language_group": "synapse_pyspark"
+# META }
+
+# CELL ********************
+
+# ============================================================
+# 8️⃣ BENCHMARK — Store the order payload as a JSON string and query it
+# ============================================================
+
+# NOTE: This lands a nested order as raw JSON text; every read must re-parse the string.
+EX8_STRING = f"{WORK_SCHEMA}.web_order_json_string"
+EX8_VARIANT = f"{WORK_SCHEMA}.web_order_variant"
+for table in [EX8_STRING, EX8_VARIANT]:
+    spark.sql(f"DROP TABLE IF EXISTS {table}")
+
+orders_flat = spark.table(f"{WORK_SCHEMA}.web_order").selectExpr("web_order.*")
+order_payload = orders_flat.select(
+    F.to_json(F.struct(*[F.col(c) for c in orders_flat.columns])).alias("order_json")
+)
+order_payload.write.format("delta").mode("overwrite").saveAsTable(EX8_STRING)
+spark.sql(f"OPTIMIZE {EX8_STRING}")
+metrics_8_before = show_metrics(EX8_STRING, "order payload as JSON string")
+
+with benchmark_op("Ex8 Variant", "json string", spark):
+    json_string_rows = spark.sql(f"""
+        SELECT get_json_object(order_json, '$.customer_id') AS customer_id,
+               COUNT(*) AS orders
+        FROM {EX8_STRING}
+        WHERE get_json_object(order_json, '$.customer_id') IS NOT NULL
+        GROUP BY get_json_object(order_json, '$.customer_id')
+        ORDER BY orders DESC, customer_id
+        LIMIT 10
+    """).collect()
+
+# =================================================================================================
+# 8️⃣ DIAGNOSE — Every filter/extract re-parses the JSON text; keys are repeated on every row
+# =================================================================================================
+
+# NOTE: sizeInBytes is the baseline to compare after switching to VARIANT.
+display(spark.sql(f"DESCRIBE DETAIL {EX8_STRING}").select("numFiles", "sizeInBytes"))
+
+# METADATA ********************
+
+# META {
+# META   "language": "python",
+# META   "language_group": "synapse_pyspark"
+# META }
+
+# MARKDOWN ********************
+
+# ### 🎯 Challenge
+# 
+# Write the same payload to a new Delta table with the JSON parsed into a `VARIANT` column (`parse_json(order_json)`), then run the equivalent aggregation with `variant_get(...)`. Compare `DESCRIBE DETAIL` size and confirm the business result is identical.
+
+# METADATA ********************
+
+# META {
+# META   "language": "python",
+# META   "language_group": "synapse_pyspark"
+# META }
+
+# CELL ********************
+
+# Challenge starter — parse the JSON text into a VARIANT column.
+# variant_df = spark.table(EX8_STRING).withColumn("order_v", F.expr("parse_json(order_json)")).select("order_v")
+print("Target VARIANT table:", EX8_VARIANT)
+print("Extract fields with e.g. variant_get(order_v, '$.customer_id', 'string')")
+
+# METADATA ********************
+
+# META {
+# META   "language": "python",
+# META   "language_group": "synapse_pyspark"
+# META }
+
+# CELL ********************
+
+# ==================================================================================================
+# 8️⃣ FIX — Store the payload as native VARIANT
+# ==================================================================================================
+
+# NOTE: parse_json() produces a compact binary VARIANT; no per-query text parsing is needed.
+variant_df = (
+    spark.table(EX8_STRING)
+    .withColumn("order_v", F.expr("parse_json(order_json)"))
+    .select("order_v")
+)
+variant_df.write.format("delta").mode("overwrite").saveAsTable(EX8_VARIANT)
+spark.sql(f"OPTIMIZE {EX8_VARIANT}")
+metrics_8_after = show_metrics(EX8_VARIANT, "order payload as VARIANT")
+spark.table(EX8_VARIANT).printSchema()
+
+# METADATA ********************
+
+# META {
+# META   "language": "python",
+# META   "language_group": "synapse_pyspark"
+# META }
+
+# CELL ********************
+
+# ============================================================
+# 8️⃣ CHECK-CHANGES — Same result from VARIANT, with compact binary storage
+# ============================================================
+
+# NOTE: variant_get extracts typed fields directly from the binary VARIANT (no JSON text parse).
+with benchmark_op("Ex8 Variant", "variant", spark):
+    variant_rows = spark.sql(f"""
+        SELECT variant_get(order_v, '$.customer_id', 'string') AS customer_id,
+               COUNT(*) AS orders
+        FROM {EX8_VARIANT}
+        WHERE variant_get(order_v, '$.customer_id', 'string') IS NOT NULL
+        GROUP BY variant_get(order_v, '$.customer_id', 'string')
+        ORDER BY orders DESC, customer_id
+        LIMIT 10
+    """).collect()
+
+json_string_map = {r["customer_id"]: r["orders"] for r in json_string_rows}
+variant_map = {r["customer_id"]: r["orders"] for r in variant_rows}
+print("Same business result:", json_string_map == variant_map)
+print(f"Size as JSON string: {metrics_8_before['size_mb']:.2f} MB")
+print(f"Size as VARIANT:     {metrics_8_after['size_mb']:.2f} MB")
+print("VARIANT avoids re-parsing JSON text on every read and supports field extraction, typing, and future shredding/stats.")
 
 # METADATA ********************
 

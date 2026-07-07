@@ -49,7 +49,8 @@
 # | 5 — Unnecessary global sort | An aggregate is preceded by `orderBy("timestamp")` over the full dataset. | `Sort` + Exchange removed from the plan; identical aggregate. |
 # | 6 — Cartesian / missing join key | A pass-rate query omits the production-order join key, and a cycle-time variant uses an inequality self-join. | `CartesianProduct` / nested-loop work replaced by equi-join or window logic; runtime and pair counts drop. |
 # | 7 — Python UDFs → native expressions | A top-customer query computes line totals/order days with Python UDFs (NEE disabled to expose the JVM boundary). | `BatchEvalPython` removed after rewriting UDFs as native expressions; NEE makes the rewrite optional (see Module 3). |
-# | 8 — Driver `collect()` / `toPandas()` and driver OOM | An inventory workflow collects raw transactions to the driver and aggregates in Python. Run last so a driver crash cannot abort earlier exercises. | Driver result size shrinks / raw-row collect avoided; no OOM risk from full-result transfer. |
+# | 8 — `withColumn` loop → `withColumns` | Feature engineering adds ~50 derived columns by chaining `.withColumn()`, one per column. | Analyzed plan collapses from ~50 nested `Project` nodes to 1; identical columns and rows. |
+# | 9 — Driver `collect()` / `toPandas()` and driver OOM | An inventory workflow collects raw transactions to the driver and aggregates in Python. Run last so a driver crash cannot abort earlier exercises. | Driver result size shrinks / raw-row collect avoided; no OOM risk from full-result transfer. |
 
 
 # CELL ********************
@@ -1283,7 +1284,146 @@ restore_conf("spark.native.enabled")
 
 # ---
 # 
-# ## Exercise 8 — Driver `collect()` / `toPandas()` and driver OOM
+# ## Exercise 8 — `withColumn` in a loop → `withColumns`
+# 
+# **Problem:** Feature-engineering code adds many derived columns by chaining `.withColumn()` in a loop — one call per column.
+# 
+# **Why it matters:** Each `.withColumn()` adds another nested `Project` to the logical plan and re-resolves the schema on the driver. Dozens of chained calls build a deep plan that is slow to analyze/plan (and can even `StackOverflow`), even though the executed result is identical.
+# 
+# **Fix in one line:** Add every column in a single `.withColumns({...})` call (Spark 3.3+).
+
+# METADATA ********************
+
+# META {
+# META   "language": "python",
+# META   "language_group": "synapse_pyspark"
+# META }
+
+# CELL ********************
+
+# ============================================================
+# 8️⃣ BENCHMARK — Build many columns by chaining withColumn in a loop
+# ============================================================
+
+# Baseline: one .withColumn() per feature nests a Project per column on the driver.
+events_wc = spark.table(table_ref("manufacturing_event")).select(
+    F.col("manufacturing_event.machine_id").alias("machine_id"),
+    F.col("manufacturing_event.cycle_time_ms").alias("cycle_time_ms"),
+)
+N_FEATURES = 50
+
+with benchmark_op("withColumn vs withColumns", "before", spark):
+    wc_before_df = events_wc
+    for i in range(N_FEATURES):
+        wc_before_df = wc_before_df.withColumn(f"feat_{i}", F.col("cycle_time_ms") + F.lit(i))
+    wc_before_count = wc_before_df.count()
+
+print("Columns:", len(wc_before_df.columns), "| Rows:", wc_before_count)
+
+# METADATA ********************
+
+# META {
+# META   "language": "python",
+# META   "language_group": "synapse_pyspark"
+# META }
+
+# CELL ********************
+
+# =================================================================================================
+# 8️⃣ DIAGNOSE — The chained calls create a deep, project-heavy analyzed plan
+# =================================================================================================
+
+# Count the nested Project nodes the chained withColumn() calls produced.
+wc_before_analyzed = wc_before_df._jdf.queryExecution().analyzed().toString()
+print(json.dumps({
+    "antiPattern": "chained withColumn() — one Project per column",
+    "featureColumns": N_FEATURES,
+    "projectNodesInAnalyzedPlan": wc_before_analyzed.count("Project"),
+}, default=str, indent=2))
+print(wc_before_analyzed[:1200])
+
+# METADATA ********************
+
+# META {
+# META   "language": "python",
+# META   "language_group": "synapse_pyspark"
+# META }
+
+# MARKDOWN ********************
+
+# ### 🎯 Challenge
+# 
+# Replace the loop of `.withColumn()` calls with a single `.withColumns({...})` that maps each new column name to its expression. The result must match, with far fewer `Project` nodes in the analyzed plan.
+
+# METADATA ********************
+
+# META {
+# META   "language": "python",
+# META   "language_group": "synapse_pyspark"
+# META }
+
+# CELL ********************
+
+# Starter: build the {name: expression} mapping, then call withColumns once.
+feature_exprs = {f"feat_{i}": F.col("cycle_time_ms") + F.lit(i) for i in range(N_FEATURES)}
+print("Mapping size:", len(feature_exprs))
+
+# METADATA ********************
+
+# META {
+# META   "language": "python",
+# META   "language_group": "synapse_pyspark"
+# META }
+
+# CELL ********************
+
+# ==================================================================================================
+# 8️⃣ FIX — Add all columns in a single withColumns() call
+# ==================================================================================================
+
+# One withColumns() adds every column in a single projection.
+with benchmark_op("withColumn vs withColumns", "after", spark):
+    feature_exprs = {f"feat_{i}": F.col("cycle_time_ms") + F.lit(i) for i in range(N_FEATURES)}
+    wc_after_df = events_wc.withColumns(feature_exprs)
+    wc_after_count = wc_after_df.count()
+
+print("Columns:", len(wc_after_df.columns), "| Rows:", wc_after_count)
+
+# METADATA ********************
+
+# META {
+# META   "language": "python",
+# META   "language_group": "synapse_pyspark"
+# META }
+
+# CELL ********************
+
+# ============================================================
+# 8️⃣ CHECK-CHANGES — Same columns/rows, a far simpler analyzed plan
+# ============================================================
+
+# Identical output, dramatically fewer Project nodes to analyze.
+wc_after_analyzed = wc_after_df._jdf.queryExecution().analyzed().toString()
+record_result("8 withColumn -> withColumns", "after", {
+    "antiPattern": "chained withColumn() in a loop",
+    "sameColumns": sorted(wc_before_df.columns) == sorted(wc_after_df.columns),
+    "sameRowCount": wc_before_count == wc_after_count,
+    "baselineProjectNodes": wc_before_analyzed.count("Project"),
+    "fixedProjectNodes": wc_after_analyzed.count("Project"),
+})
+
+# METADATA ********************
+
+# META {
+# META   "language": "python",
+# META   "language_group": "synapse_pyspark"
+# META }
+
+# MARKDOWN ********************
+
+# ---
+# 
+# ## Exercise 9 — Driver `collect()` / `toPandas()` and driver OOM
 # 
 # **Problem:** The inventory workflow pulls every transaction to the driver with `collect()` and aggregates in Python. `.toPandas()` has the same raw-data movement risk.
 # 
@@ -1294,7 +1434,7 @@ restore_conf("spark.native.enabled")
 # CELL ********************
 
 # ============================================================
-# 8️⃣ BENCHMARK — Capture baseline query time
+# 9️⃣ BENCHMARK — Capture baseline query time
 # ============================================================
 
 # The baseline collects every raw transaction to the driver before aggregating.
@@ -1335,7 +1475,7 @@ display(driver_result_rows)
 # CELL ********************
 
 # =================================================================================================
-# 8️⃣ DIAGNOSE — Prove the root cause is raw-row transfer to the driver
+# 9️⃣ DIAGNOSE — Prove the root cause is raw-row transfer to the driver
 # =================================================================================================
 
 # Record how many rows crossed to the driver and why that creates OOM risk.
@@ -1385,7 +1525,7 @@ display(starter_signed_inventory.limit(5))
 # CELL ********************
 
 # ==================================================================================================
-# 8️⃣ FIX — Aggregate on executors and collect only the small grouped result
+# 9️⃣ FIX — Aggregate on executors and collect only the small grouped result
 # ==================================================================================================
 
 # Spark computes net inventory by line before the driver receives the display result.
@@ -1412,7 +1552,7 @@ display(driver_after_pdf)
 # CELL ********************
 
 # ============================================================
-# 8️⃣ CHECK-CHANGES — Compare against baseline
+# 9️⃣ CHECK-CHANGES — Compare against baseline
 # ============================================================
 
 # Verify the fixed path collects only the final grouped rows.
