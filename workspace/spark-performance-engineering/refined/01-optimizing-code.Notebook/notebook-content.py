@@ -43,12 +43,13 @@
 # | Exercise | Scenario | Expected performance signal |
 # |---|---|---|
 # | 1 — Predicate pushdown | A daily defect-rate dashboard derives a string day before filtering `manufacturing_event`. | Fewer files read / filter pushed to FileScan; substring disappears from the filter path. |
-# | 2 — Column pruning / projection | A "distinct orders" step calls `dropDuplicates()` with no subset, shuffling every column including the nested `order_lines` array. | FileScan ReadSchema shrinks; only the key columns are shuffled. |
-# | 3 — Reduce before you join | A status roll-up joins every raw `manufacturing_event` row to `production_order`, then aggregates. | Events pre-aggregated to the join grain; far fewer rows shuffle into the join. |
-# | 4 — Cartesian / missing join key | A pass-rate query omits the production-order join key, and a cycle-time variant uses an inequality self-join. | `CartesianProduct` / nested-loop work replaced by equi-join or window logic; runtime and pair counts drop. |
-# | 5 — Python UDFs → native expressions | A top-customer query computes line totals/order days with Python UDFs (NEE disabled to expose the JVM boundary). | `BatchEvalPython` removed after rewriting UDFs as native expressions; NEE makes the rewrite optional (see Module 3). |
-# | 6 — `withColumn` loop → `withColumns` | Feature engineering adds ~50 derived columns by chaining `.withColumn()`, one per column. | Analyzed plan collapses from ~50 nested `Project` nodes to 1; identical columns and rows. |
-# | 7 — Driver `collect()` / `toPandas()` and driver OOM | An inventory workflow collects raw transactions to the driver and aggregates in Python. Run last so a driver crash cannot abort earlier exercises. | Driver result size shrinks / raw-row collect avoided; no OOM risk from full-result transfer. |
+# | 2 — De-duplicate on the key, not the whole row | A "distinct orders" step calls `dropDuplicates()` with no subset, shuffling every column including the nested `order_lines` array. | FileScan ReadSchema shrinks; only the key columns are shuffled. |
+# | 3 — Prune before a window / row_number | A "latest order per customer" runs `row_number()` over the wide `web_order` row, shuffling and sorting every column — including the nested `order_lines` array — through the window. | Only the key columns cross the window Exchange/Sort; `order_lines` is pruned; identical latest-row result. |
+# | 4 — Reduce before you join | A status roll-up joins every raw `manufacturing_event` row to `production_order`, then aggregates. | Events pre-aggregated to the join grain; far fewer rows shuffle into the join. |
+# | 5 — Cartesian / missing join key | A pass-rate query omits the production-order join key, and a cycle-time variant uses an inequality self-join. | `CartesianProduct` / nested-loop work replaced by equi-join or window logic; runtime and pair counts drop. |
+# | 6 — Python UDFs → native expressions | A top-customer query computes line totals/order days with Python UDFs (NEE disabled to expose the JVM boundary). | `BatchEvalPython` removed after rewriting UDFs as native expressions; NEE makes the rewrite optional (see Module 3). |
+# | 7 — `withColumn` loop → `withColumns` | Feature engineering adds ~50 derived columns by chaining `.withColumn()`, one per column. | Analyzed plan collapses from ~50 nested `Project` nodes to 1; identical columns and rows. |
+# | 8 — Driver `collect()` / `toPandas()` and driver OOM | An inventory workflow collects raw transactions to the driver and aggregates in Python. Run last so a driver crash cannot abort earlier exercises. | Driver result size shrinks / raw-row collect avoided; no OOM risk from full-result transfer. |
 
 
 # CELL ********************
@@ -276,7 +277,7 @@ result_predicate_after.explain(mode="formatted")
 
 # ---
 # 
-# ## Exercise 2 — Column pruning / projection
+# ## Exercise 2 — De-duplicate on the key, not the whole row
 # 
 # **Problem:** A "distinct orders" step calls `distinct()` or `dropDuplicates` with no column list, so Spark uses every column as the de-duplication key — including the nested `order_lines` array.
 # 
@@ -412,9 +413,186 @@ proj_after_df.explain(mode="formatted")
 
 # MARKDOWN ********************
 
+# ## Exercise 3 — Prune columns before a window / row_number
+#
+# **Problem:** A "latest order per customer" step runs `row_number()` over the wide `web_order` row. The window has to shuffle (Exchange) and sort every column — including the nested `order_lines` array — even though only a few fields are needed.
+#
+# **Why it matters:** A window with `partitionBy` / `orderBy` forces an Exchange + Sort. Whatever columns are on the DataFrame ride through that shuffle and sort, so carrying an unused nested array inflates the shuffle and sort spill for nothing.
+#
+# **Fix in one line:** Project just the columns the window needs before applying it, so the Exchange and Sort move a narrow row.
+
+# METADATA ********************
+
+# META {
+# META   "language": "python",
+# META   "language_group": "synapse_pyspark"
+# META }
+
+# CELL ********************
+
+# ============================================================
+# 3️⃣ BENCHMARK — Capture baseline query time
+# ============================================================
+from pyspark.sql import Window
+
+# Baseline: row_number() over the wide, nested frame — every column rides through the window.
+w_latest = Window.partitionBy("customer_id").orderBy(F.col("order_date").desc())
+orders_wide = spark.table(table_ref("web_order")).selectExpr("web_order.*")
+latest_before = orders_wide.withColumn("rn", F.row_number().over(w_latest)).filter("rn = 1")
+
+# noop sink forces full execution (window shuffle + sort) without pulling rows to the driver.
+with benchmark_op("Prune before window", "before", spark):
+    latest_before.write.format("noop").mode("overwrite").save()
+
+print("Columns through the window:", len(latest_before.columns))
+
+# METADATA ********************
+
+# META {
+# META   "language": "python",
+# META   "language_group": "synapse_pyspark"
+# META }
+
+# CELL ********************
+
+# =================================================================================================
+# 3️⃣ DIAGNOSE — Prove the window shuffles and sorts the unused nested array
+# =================================================================================================
+
+# The Exchange/Sort feeding the Window carries every column, including order_lines.
+before_win_plan = plan_string(latest_before)
+print(json.dumps({
+    "antiPattern": "row_number() window applied to the full wide row",
+    "columnsThroughWindow": len(latest_before.columns),
+    "windowShufflesNestedOrderLines": "order_lines" in before_win_plan,
+}, default=str, indent=2))
+latest_before.explain(mode="formatted")
+
+# METADATA ********************
+
+# META {
+# META   "language": "python",
+# META   "language_group": "synapse_pyspark"
+# META }
+
+# MARKDOWN ********************
+
+# ### 🎯 Challenge
+#
+# You only need `customer_id`, `order_date`, and `order_total` to pick the latest order. Project those columns before the `row_number()` window so the Exchange and Sort move a narrow row and `order_lines` never enters the shuffle. Confirm the latest-row result is unchanged.
+
+# METADATA ********************
+
+# META {
+# META   "language": "python",
+# META   "language_group": "synapse_pyspark"
+# META }
+
+# CELL ********************
+
+# Starter: project the columns the window needs BEFORE applying it.
+orders_keys_starter = spark.table(table_ref("web_order")).selectExpr("web_order.*")  # TODO: select customer_id, order_date, order_total
+print("Columns that would enter the window:", len(orders_keys_starter.columns))
+
+# METADATA ********************
+
+# META {
+# META   "language": "python",
+# META   "language_group": "synapse_pyspark"
+# META }
+
+# CELL ********************
+
+# ==================================================================================================
+# 3️⃣ FIX — Project the window's columns before applying it
+# ==================================================================================================
+
+# Selecting first keeps order_lines out of the Exchange and Sort.
+orders_keys = spark.table(table_ref("web_order")).select(
+    F.col("web_order.customer_id").alias("customer_id"),
+    F.col("web_order.order_date").alias("order_date"),
+    F.col("web_order.order_total").alias("order_total"),
+)
+latest_after = orders_keys.withColumn("rn", F.row_number().over(w_latest)).filter("rn = 1")
+
+with benchmark_op("Prune before window", "after", spark):
+    latest_after.write.format("noop").mode("overwrite").save()
+
+print("Columns through the window:", len(latest_after.columns))
+
+# METADATA ********************
+
+# META {
+# META   "language": "python",
+# META   "language_group": "synapse_pyspark"
+# META }
+
+# CELL ********************
+
+# ============================================================
+# 3️⃣ CHECK-CHANGES — Compare against baseline
+# ============================================================
+
+# Fewer columns cross the window Exchange/Sort, and the latest order per customer is identical.
+after_win_plan = plan_string(latest_after)
+before_keys = {r["customer_id"]: (str(r["order_date"]), round(float(r["order_total"] or 0), 2))
+               for r in latest_before.select("customer_id", "order_date", "order_total").collect()}
+after_keys = {r["customer_id"]: (str(r["order_date"]), round(float(r["order_total"] or 0), 2))
+              for r in latest_after.select("customer_id", "order_date", "order_total").collect()}
+print(json.dumps({
+    "antiPattern": "windowing over unpruned columns",
+    "baselineColumnsThroughWindow": len(latest_before.columns),
+    "fixedColumnsThroughWindow": len(latest_after.columns),
+    "baselineWindowShufflesOrderLines": "order_lines" in before_win_plan,
+    "fixedWindowShufflesOrderLines": "order_lines" in after_win_plan,
+    "sameLatestPerCustomer": before_keys == after_keys,
+}, default=str, indent=2))
+
+# METADATA ********************
+
+# META {
+# META   "language": "python",
+# META   "language_group": "synapse_pyspark"
+# META }
+
+# MARKDOWN ********************
+
+# ✅ Verify that `fixedWindowShufflesOrderLines` is `False` and `fixedColumnsThroughWindow` is `4` (the three keys plus `rn`), while `sameLatestPerCustomer` is `True`.
+
+# METADATA ********************
+
+# META {
+# META   "language": "python",
+# META   "language_group": "synapse_pyspark"
+# META }
+
+# CELL ********************
+
+latest_after.explain(mode="formatted")
+
+# METADATA ********************
+
+# META {
+# META   "language": "python",
+# META   "language_group": "synapse_pyspark"
+# META }
+
+# MARKDOWN ********************
+
+# ---
+
+# METADATA ********************
+
+# META {
+# META   "language": "python",
+# META   "language_group": "synapse_pyspark"
+# META }
+
+# MARKDOWN ********************
+
 # ---
 # 
-# ## Exercise 3 — Reduce before you join
+# ## Exercise 4 — Reduce before you join
 # 
 # **Problem:** A status roll-up joins *every raw* `manufacturing_event` row to `production_order`, then aggregates by `status`.
 # 
@@ -425,7 +603,7 @@ proj_after_df.explain(mode="formatted")
 # CELL ********************
 
 # ============================================================
-# 3️⃣ BENCHMARK — Capture baseline query time
+# 4️⃣ BENCHMARK — Capture baseline query time
 # ============================================================
 
 # Baseline: join all raw event rows, then aggregate by status.
@@ -458,7 +636,7 @@ with benchmark_op("Reduce before join", "before", spark):
 # CELL ********************
 
 # =================================================================================================
-# 3️⃣ DIAGNOSE — Prove every raw fact row is shuffled into the join
+# 4️⃣ DIAGNOSE — Prove every raw fact row is shuffled into the join
 # =================================================================================================
 
 # Compare the raw event count against the far smaller join-key grain.
@@ -525,7 +703,7 @@ display(join_starter_df)
 # CELL ********************
 
 # ==================================================================================================
-# 3️⃣ FIX — Pre-aggregate to the join grain, then join the small result
+# 4️⃣ FIX — Pre-aggregate to the join grain, then join the small result
 # ==================================================================================================
 
 # Reducing the fact before the join shrinks the shuffle feeding it.
@@ -552,7 +730,7 @@ with benchmark_op("Reduce before join", "after", spark):
 # CELL ********************
 
 # ============================================================
-# 3️⃣ CHECK-CHANGES — Compare against baseline
+# 4️⃣ CHECK-CHANGES — Compare against baseline
 # ============================================================
 from pyspark.testing import assertDataFrameEqual
 
@@ -580,7 +758,7 @@ print(json.dumps({
 
 # ---
 # 
-# ## Exercise 4 — Cartesian / missing join key
+# ## Exercise 5 — Cartesian / missing join key
 # 
 # **Problem:** A pass-rate query combines `quality_inspection` with `production_order` without the production-order join key. A related cycle-time query uses an inequality self-join when it really needs the previous event per machine.
 # 
@@ -591,7 +769,7 @@ print(json.dumps({
 # CELL ********************
 
 # ============================================================
-# 4️⃣ BENCHMARK — Capture baseline query time
+# 5️⃣ BENCHMARK — Capture baseline query time
 # ============================================================
 
 # The baseline omits the equality key and creates N × M join work.
@@ -634,7 +812,7 @@ with benchmark_op("Cartesian Join", "before", spark):
 # CELL ********************
 
 # =================================================================================================
-# 4️⃣ DIAGNOSE — Prove the root cause is a Cartesian or nested-loop join
+# 5️⃣ DIAGNOSE — Prove the root cause is a Cartesian or nested-loop join
 # =================================================================================================
 
 # Inspect the executed plan and compare expected pair counts with displayed results.
@@ -689,7 +867,7 @@ display(starter_join_preview)
 # CELL ********************
 
 # ==================================================================================================
-# 4️⃣ FIX — Add the production_order_id equality join condition
+# 5️⃣ FIX — Add the production_order_id equality join condition
 # ==================================================================================================
 
 # The fixed query joins inspections to production orders by the real key.
@@ -717,7 +895,7 @@ with benchmark_op("Cartesian Join", "after", spark):
 # CELL ********************
 
 # ============================================================
-# 4️⃣ CHECK-CHANGES — Compare against baseline
+# 5️⃣ CHECK-CHANGES — Compare against baseline
 # ============================================================
 
 # Confirm the fixed plan uses a real equi-join and processes matched rows only.
@@ -748,7 +926,7 @@ result_cartesian_after.explain(mode="formatted")
 
 # ---
 # 
-# ## Exercise 5 — Python UDFs → native expressions
+# ## Exercise 6 — Python UDFs → native expressions
 # 
 # **Problem:** A top-customer spend query computes line totals and order days with scalar Python UDFs.
 # 
@@ -761,7 +939,7 @@ result_cartesian_after.explain(mode="formatted")
 # CELL ********************
 
 # ============================================================
-# 5️⃣ BENCHMARK — Baseline Python UDFs on the JVM
+# 6️⃣ BENCHMARK — Baseline Python UDFs on the JVM
 # ============================================================
 
 # NEE is disabled here only to expose the JVM Python boundary; it is restored at the end.
@@ -820,7 +998,7 @@ display(udf_before_pdf)
 # CELL ********************
 
 # =================================================================================================
-# 5️⃣ DIAGNOSE — Prove the root cause is the JVM Python boundary
+# 6️⃣ DIAGNOSE — Prove the root cause is the JVM Python boundary
 # =================================================================================================
 
 # On the JVM the plan shows BatchEvalPython / PythonUDF and NEE fallback blocks.
@@ -871,7 +1049,7 @@ starter_native.explain(mode="formatted")
 # CELL ********************
 
 # ==================================================================================================
-# 5️⃣ FIX — Native Spark expressions remove the Python boundary (still on the JVM)
+# 6️⃣ FIX — Native Spark expressions remove the Python boundary (still on the JVM)
 # ==================================================================================================
 
 # Native expressions keep execution inside Spark — no JVM↔Python round-trip.
@@ -906,7 +1084,7 @@ display(native_after_pdf)
 # CELL ********************
 
 # ============================================================
-# 5️⃣ CHECK-CHANGES — Compare against baseline 
+# 6️⃣ CHECK-CHANGES — Compare against baseline 
 # ============================================================
 
 # Same result, Python boundary gone.
@@ -934,7 +1112,7 @@ restore_conf("spark.native.enabled")
 
 # ---
 # 
-# ## Exercise 6 — `withColumn` in a loop → `withColumns`
+# ## Exercise 7 — `withColumn` in a loop → `withColumns`
 # 
 # **Problem:** Feature-engineering code adds many derived columns by chaining `.withColumn()` in a loop — one call per column.
 # 
@@ -945,7 +1123,7 @@ restore_conf("spark.native.enabled")
 # CELL ********************
 
 # ============================================================
-# 6️⃣ BENCHMARK — Build many columns by chaining withColumn in a loop
+# 7️⃣ BENCHMARK — Build many columns by chaining withColumn in a loop
 # ============================================================
 
 # Baseline: one .withColumn() per feature nests a Project per column on the driver.
@@ -973,7 +1151,7 @@ print("Columns:", len(wc_before_df.columns), "| Rows:", wc_before_count)
 # CELL ********************
 
 # =================================================================================================
-# 6️⃣ DIAGNOSE — The chained calls create a deep, project-heavy analyzed plan
+# 7️⃣ DIAGNOSE — The chained calls create a deep, project-heavy analyzed plan
 # =================================================================================================
 
 # Count the nested Project nodes the chained withColumn() calls produced.
@@ -1037,7 +1215,7 @@ display(wc_starter_df.limit(5))
 # CELL ********************
 
 # ==================================================================================================
-# 6️⃣ FIX — Add all columns in a single withColumns() call
+# 7️⃣ FIX — Add all columns in a single withColumns() call
 # ==================================================================================================
 
 # One withColumns() adds every column in a single projection.
@@ -1058,7 +1236,7 @@ print("Columns:", len(wc_after_df.columns), "| Rows:", wc_after_count)
 # CELL ********************
 
 # ============================================================
-# 6️⃣ CHECK-CHANGES — Same columns/rows, a far simpler analyzed plan
+# 7️⃣ CHECK-CHANGES — Same columns/rows, a far simpler analyzed plan
 # ============================================================
 
 # Identical output, dramatically fewer Project nodes to analyze.
@@ -1084,7 +1262,7 @@ print(f"{wc_before_analyzed[:3600]}...")
 
 # ---
 # 
-# ## Exercise 7 — Driver `collect()` / `toPandas()` and driver OOM
+# ## Exercise 8 — Driver `collect()` / `toPandas()` and driver OOM
 # 
 # **Problem:** The inventory workflow pulls every transaction to the driver with `collect()` and aggregates in Python. `.toPandas()` has the same raw-data movement risk.
 # 
@@ -1095,7 +1273,7 @@ print(f"{wc_before_analyzed[:3600]}...")
 # CELL ********************
 
 # ============================================================
-# 7️⃣ BENCHMARK — Capture baseline query time
+# 8️⃣ BENCHMARK — Capture baseline query time
 # ============================================================
 from collections import defaultdict
 
@@ -1138,7 +1316,7 @@ display(driver_result_rows)
 # CELL ********************
 
 # =================================================================================================
-# 7️⃣ DIAGNOSE — Prove the root cause is raw-row transfer to the driver
+# 8️⃣ DIAGNOSE — Prove the root cause is raw-row transfer to the driver
 # =================================================================================================
 
 # Record how many rows crossed to the driver and why that creates OOM risk.
@@ -1188,7 +1366,7 @@ display(starter_signed_inventory.limit(5))
 # CELL ********************
 
 # ==================================================================================================
-# 7️⃣ FIX — Aggregate on executors and collect only the small grouped result
+# 8️⃣ FIX — Aggregate on executors and collect only the small grouped result
 # ==================================================================================================
 
 # Spark computes net inventory by line before the driver receives the display result.
@@ -1213,7 +1391,7 @@ with benchmark_op("Driver Collect", "after", spark):
 # CELL ********************
 
 # ============================================================
-# 7️⃣ CHECK-CHANGES — Compare against baseline
+# 8️⃣ CHECK-CHANGES — Compare against baseline
 # ============================================================
 
 # Verify the fixed path collects only the final grouped rows.
@@ -1237,9 +1415,17 @@ result_driver_after.explain(mode="formatted")
 
 # ---
 # 
-# ## Summary
+# ## Summary — Optimizing code
 # 
-# You experienced seven code-level Spark anti-patterns that result in slower performance and how to address them:
+# You worked through eight code-level Spark anti-patterns, each with the same loop: benchmark the symptom, diagnose it in the physical plan, change one line, and re-check.
 # 
+# 1. **Predicate pushdown** — filtered on a raw column so the scan prunes files instead of deriving a value first.
+# 2. **De-duplicate on the key, not the whole row** — passed the key subset to `dropDuplicates` instead of comparing every column.
+# 3. **Prune before a window** — projected the key columns before a `row_number()` window so the Exchange/Sort no longer carries the nested `order_lines` array.
+# 4. **Reduce before you join** — pre-aggregated to the join grain so far fewer rows shuffle into the join.
+# 5. **Cartesian / missing join key** — restored the equi-join key so nested-loop work collapses to a hash join.
+# 6. **Python UDFs → native expressions** — replaced `BatchEvalPython` with native expressions (NEE makes the rewrite optional — see Module 3).
+# 7. **`withColumn` loop → `withColumns`** — collapsed ~50 chained `Project` nodes into one.
+# 8. **Driver `collect()` / OOM** — kept the aggregation distributed and returned only the small result to the driver.
 # 
 # Carry the same workflow into the next modules: benchmark the symptom, inspect the Spark UI and physical plan, check Delta metadata, change the right lever, and validate the before/after result.
