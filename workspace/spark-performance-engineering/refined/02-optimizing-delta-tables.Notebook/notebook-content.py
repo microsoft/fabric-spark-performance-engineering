@@ -5,22 +5,6 @@
 # META {
 # META   "kernel_info": {
 # META     "name": "synapse_pyspark"
-# META   },
-# META   "dependencies": {
-# META     "lakehouse": {
-# META       "default_lakehouse": "28f1e957-ea23-49e8-846b-be0d8a67412e",
-# META       "default_lakehouse_name": "toy_bricks",
-# META       "default_lakehouse_workspace_id": "7fc5eff4-7153-4da9-b909-54981a3ffcdb",
-# META       "known_lakehouses": [
-# META         {
-# META           "id": "28f1e957-ea23-49e8-846b-be0d8a67412e"
-# META         }
-# META       ]
-# META     },
-# META     "environment": {
-# META       "environmentId": "3cdd45c3-659b-bb60-4877-86d399fb9cb3",
-# META       "workspaceId": "00000000-0000-0000-0000-000000000000"
-# META     }
 # META   }
 # META }
 
@@ -50,6 +34,7 @@
 # | 6. Partitioning strategy | Compare no partitioning, high-cardinality `part_num`, and date partitioning. | Avoid over-partitioning; balanced file sizes and input-file counts align with time-range and point filters. |
 # | 7. Delta storage-regression audit | Use history and properties to find an append that regressed `inventory_transaction_audit` layout. | Isolate the commit/version that regressed file layout via `DESCRIBE HISTORY`, then verify file count and pruning recover. |
 # | 8. Semi-structured storage: `VARIANT` vs JSON string | Store `web_order` payloads as a JSON string column, then as native `VARIANT`. | Field extraction stops re-parsing JSON text; VARIANT stores nested data in compact binary form with smaller/comparable table size. |
+
 
 # CELL ********************
 
@@ -1145,13 +1130,6 @@ display(spark.sql(f"SHOW TBLPROPERTIES {EX7_TABLE}").filter("key LIKE 'delta.aut
 # 
 # > NOTE: `VARIANT` requires a Fabric runtime that supports it (Spark 4.x / Delta with the Variant type). This is intentionally the **last** exercise so that, on a runtime without VARIANT, the earlier exercises still complete.
 
-# METADATA ********************
-
-# META {
-# META   "language": "python",
-# META   "language_group": "synapse_pyspark"
-# META }
-
 # CELL ********************
 
 # ============================================================
@@ -1202,13 +1180,6 @@ display(spark.sql(f"DESCRIBE DETAIL {EX8_STRING}").select("numFiles", "sizeInByt
 # ### 🎯 Challenge
 # 
 # Write the same payload to a new Delta table with the JSON parsed into a `VARIANT` column (`parse_json(order_json)`), then run the equivalent aggregation with `variant_get(...)`. Compare `DESCRIBE DETAIL` size and confirm the business result is identical.
-
-# METADATA ********************
-
-# META {
-# META   "language": "python",
-# META   "language_group": "synapse_pyspark"
-# META }
 
 # CELL ********************
 

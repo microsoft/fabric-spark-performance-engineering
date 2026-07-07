@@ -45,12 +45,10 @@
 # | 1 — Predicate pushdown | A daily defect-rate dashboard derives a string day before filtering `manufacturing_event`. | Fewer files read / filter pushed to FileScan; substring disappears from the filter path. |
 # | 2 — Column pruning / projection | A "distinct orders" step calls `dropDuplicates()` with no subset, shuffling every column including the nested `order_lines` array. | FileScan ReadSchema shrinks; only the key columns are shuffled. |
 # | 3 — Reduce before you join | A status roll-up joins every raw `manufacturing_event` row to `production_order`, then aggregates. | Events pre-aggregated to the join grain; far fewer rows shuffle into the join. |
-# | 4 — Redundant double shuffle | A per-customer spend query runs `groupBy(customer, day)` then `groupBy(customer)` — two shuffles for one result. | One Exchange instead of two; identical totals. |
-# | 5 — Unnecessary global sort | An aggregate is preceded by `orderBy("timestamp")` over the full dataset. | `Sort` + Exchange removed from the plan; identical aggregate. |
-# | 6 — Cartesian / missing join key | A pass-rate query omits the production-order join key, and a cycle-time variant uses an inequality self-join. | `CartesianProduct` / nested-loop work replaced by equi-join or window logic; runtime and pair counts drop. |
-# | 7 — Python UDFs → native expressions | A top-customer query computes line totals/order days with Python UDFs (NEE disabled to expose the JVM boundary). | `BatchEvalPython` removed after rewriting UDFs as native expressions; NEE makes the rewrite optional (see Module 3). |
-# | 8 — `withColumn` loop → `withColumns` | Feature engineering adds ~50 derived columns by chaining `.withColumn()`, one per column. | Analyzed plan collapses from ~50 nested `Project` nodes to 1; identical columns and rows. |
-# | 9 — Driver `collect()` / `toPandas()` and driver OOM | An inventory workflow collects raw transactions to the driver and aggregates in Python. Run last so a driver crash cannot abort earlier exercises. | Driver result size shrinks / raw-row collect avoided; no OOM risk from full-result transfer. |
+# | 4 — Cartesian / missing join key | A pass-rate query omits the production-order join key, and a cycle-time variant uses an inequality self-join. | `CartesianProduct` / nested-loop work replaced by equi-join or window logic; runtime and pair counts drop. |
+# | 5 — Python UDFs → native expressions | A top-customer query computes line totals/order days with Python UDFs (NEE disabled to expose the JVM boundary). | `BatchEvalPython` removed after rewriting UDFs as native expressions; NEE makes the rewrite optional (see Module 3). |
+# | 6 — `withColumn` loop → `withColumns` | Feature engineering adds ~50 derived columns by chaining `.withColumn()`, one per column. | Analyzed plan collapses from ~50 nested `Project` nodes to 1; identical columns and rows. |
+# | 7 — Driver `collect()` / `toPandas()` and driver OOM | An inventory workflow collects raw transactions to the driver and aggregates in Python. Run last so a driver crash cannot abort earlier exercises. | Driver result size shrinks / raw-row collect avoided; no OOM risk from full-result transfer. |
 
 
 # CELL ********************
@@ -73,8 +71,7 @@ from pyspark.sql.window import Window
 SOURCE_SCHEMA = "bronze"
 WORK_SCHEMA = "opt_code"
 
-spark.conf.set("spark.microsoft.delta.parallelSnapshotLoading.enabled", "true")
-spark.conf.set("spark.microsoft.delta.snapshot.driverMode.enabled", "true")
+# Disable Intelligent Cache to avoid skewing benchmark results
 spark.conf.set("spark.synapse.vegas.useCache", "false")
 spark.catalog.clearCache()
 
@@ -90,7 +87,6 @@ expected_tables = [
 ]
 require_tables(expected_tables, SOURCE_SCHEMA)
 
-print("Spark application ID:", spark.sparkContext.applicationId)
 print("Source schema:", SOURCE_SCHEMA, "| Work schema:", WORK_SCHEMA)
 print("\n=== Delta table metrics from DESCRIBE DETAIL ===")
 for table_name in expected_tables:
@@ -145,9 +141,7 @@ with benchmark_op("Predicate Pushdown", "before", spark):
         )
         .orderBy(F.desc("defect_rate"))
     )
-    predicate_before_pdf = result_predicate_before.toPandas()
-
-display(predicate_before_pdf)
+    display(result_predicate_before)
 
 # METADATA ********************
 
@@ -185,9 +179,15 @@ print(json.dumps(predicate_before_evidence, default=str, indent=2))
 
 # MARKDOWN ********************
 
-# ### 🎯 Challenge
+# ### 🎯 Challenge: Check the Spark Plan and Spark UI to diagnose the problem
 # 
-# Inspect the formatted plan. Look for the `FileScan` node, `DataFilters`, `PushedFilters`, and the number of files from `inputFiles()`. Then rewrite the query so the filter is expressed before the aggregation.
+# You've seen that the query is slow, and you suspect it's because of the large number of files and the filter not being pushed down. You want to confirm this by checking the Spark Plan and the Spark UI.
+# 
+# **Your task:** Check the Spark Plan and Spark UI to confirm that the query is doing a full scan of all files and that the filter on `event_day` is not being pushed down to the file scan level.
+# 
+# > 💡 Hint: **Explain** methods in Spark can help you understand the physical plan and see if filters are being pushed down. Look for **PushedFilters** in the **DefaultDeltaScanTransformer** node of the plan. 
+# 
+# Try it in the cell below!
 
 # CELL ********************
 
@@ -223,9 +223,7 @@ with benchmark_op("Predicate Pushdown", "after", spark):
         )
         .orderBy(F.desc("defect_rate"))
     )
-    predicate_after_pdf = result_predicate_after.toPandas()
-
-display(predicate_after_pdf)
+    display(result_predicate_after)
 
 # METADATA ********************
 
@@ -261,15 +259,11 @@ print(json.dumps(predicate_after_evidence, default=str, indent=2))
 
 # MARKDOWN ********************
 
-# ---
-# 
-# ## Exercise 2 — Column pruning / projection
-# 
-# **Problem:** A "distinct orders" step calls `dropDuplicates()` with no column list, so Spark uses every column as the de-duplication key — including the nested `order_lines` array.
-# 
-# **Why it matters:** `dropDuplicates()` with no subset reads the full row schema and shuffles wide, nested data even though the business key is just a couple of columns.
-# 
-# **Fix in one line:** Project only the columns you need (or pass the key subset to `dropDuplicates`) before the shuffle.
+# ✅ Verify with the query plan that the `DefaultDeltaScanTransformer` node of the new plan has `PushedFilters`. This enables file skipping on read to minimize the amount of data that must be filtered post scan.
+
+# CELL ********************
+
+result_predicate_after.explain(mode="formatted")
 
 # METADATA ********************
 
@@ -278,17 +272,29 @@ print(json.dumps(predicate_after_evidence, default=str, indent=2))
 # META   "language_group": "synapse_pyspark"
 # META }
 
+# MARKDOWN ********************
+
+# ---
+# 
+# ## Exercise 2 — Column pruning / projection
+# 
+# **Problem:** A "distinct orders" step calls `distinct()` or `dropDuplicates` with no column list, so Spark uses every column as the de-duplication key — including the nested `order_lines` array.
+# 
+# **Why it matters:** `distinct()` compares all column values. `dropDuplicates()` with no subset also reads the full row schema and shuffles wide, nested data even though the business key is just a couple of columns.
+# 
+# **Fix in one line:** Project only the columns you need or pass the key subset to `dropDuplicates` there's less comparison and aggregation work.
+
 # CELL ********************
 
 # ============================================================
 # 2️⃣ BENCHMARK — Capture baseline query time
 # ============================================================
 
-# Baseline: dropDuplicates() with no subset shuffles every column, including order_lines.
+# Baseline: distinct() must aggregate every column, including order_lines.
 orders_wide = spark.table(table_ref("web_order")).selectExpr("web_order.*")
 
 with benchmark_op("Column pruning / projection", "before", spark):
-    proj_before_df = orders_wide.dropDuplicates()
+    proj_before_df = orders_wide.distinct()
     proj_before_count = proj_before_df.count()
 
 print("Distinct full rows:", proj_before_count)
@@ -305,16 +311,21 @@ print("Distinct full rows:", proj_before_count)
 # =================================================================================================
 # 2️⃣ DIAGNOSE — Prove the whole row (including nested arrays) is shuffled to de-duplicate
 # =================================================================================================
+def get_agg_key_count(node_name: str, df: DataFrame) -> int:
+    plan = plan_string(df)
+    key_name = "keys" if node_name == "HashAggregate" else "key"
+    first_agg = plan.split(f"{node_name}({key_name}=[", 1)[1] 
+    keys_text = first_agg.split("], functions=", 1)[0]
+    key_count = len([k.strip() for k in keys_text.split(",") if k.strip()])
+    return key_count
 
 # The FileScan ReadSchema lists every column and the Exchange carries them all.
 proj_before_plan = plan_string(proj_before_df)
 print(json.dumps({
     "antiPattern": "dropDuplicates() with no subset uses all columns as the key",
-    "columnsScannedAndShuffled": len(orders_wide.columns),
-    "columns": orders_wide.columns,
-    "exchangeCount": proj_before_plan.count("Exchange"),
+    "baselineColumnsScannedAndShuffled": get_agg_key_count("HashAggregate", proj_before_df)
 }, default=str, indent=2))
-print(proj_before_plan[:1600])
+proj_before_df.explain(mode="formatted")
 
 # METADATA ********************
 
@@ -328,13 +339,6 @@ print(proj_before_plan[:1600])
 # ### 🎯 Challenge
 # 
 # You only need distinct `customer_id` / `order_date` pairs. Rewrite the de-duplication so Spark reads and shuffles just those columns — either `select(...)` before `dropDuplicates()`, or pass the key subset to `dropDuplicates([...])`. Compare the scanned columns and the plan.
-
-# METADATA ********************
-
-# META {
-# META   "language": "python",
-# META   "language_group": "synapse_pyspark"
-# META }
 
 # CELL ********************
 
@@ -357,7 +361,7 @@ print("Columns shuffled:", len(proj_starter_df.columns))
 
 # Selecting the business key first prunes the scan and shrinks the exchange.
 with benchmark_op("Column pruning / projection", "after", spark):
-    proj_after_df = orders_wide.select("customer_id", "order_date").dropDuplicates()
+    proj_after_df = orders_wide.dropDuplicates(["customer_id", "order_date"])
     proj_after_count = proj_after_df.count()
 
 print("Distinct key rows:", proj_after_count)
@@ -376,15 +380,28 @@ print("Distinct key rows:", proj_after_count)
 # ============================================================
 
 # The fix reads far fewer columns and shuffles a narrow row.
-proj_after_plan = plan_string(proj_after_df)
-record_result("2 column pruning / projection", "after", {
+print(json.dumps({
     "antiPattern": "dropDuplicates() over all columns",
-    "baselineColumnsShuffled": len(orders_wide.columns),
-    "fixedColumnsShuffled": len(proj_after_df.columns),
-    "columnsPruned": len(orders_wide.columns) - len(proj_after_df.columns),
+    "baselineColumnsShuffled": get_agg_key_count("HashAggregate", proj_before_df),
+    "fixedColumnsShuffled": get_agg_key_count("SortAggregate", proj_after_df),
     "baselineDistinctFullRows": proj_before_count,
     "fixedDistinctKeyRows": proj_after_count,
-})
+}, default=str, indent=2))
+
+# METADATA ********************
+
+# META {
+# META   "language": "python",
+# META   "language_group": "synapse_pyspark"
+# META }
+
+# MARKDOWN ********************
+
+# ✅ Verify that the `SortAggregate` node of the plan uses only 2 columns as keys instead of 11 that the `HashAggregate` used.
+
+# CELL ********************
+
+proj_after_df.explain(mode="formatted")
 
 # METADATA ********************
 
@@ -404,13 +421,6 @@ record_result("2 column pruning / projection", "after", {
 # **Why it matters:** Millions of fact rows are shuffled into the join only to be collapsed afterward. Without table statistics, Spark keeps the written join order, so the big side is never reduced first.
 # 
 # **Fix in one line:** Pre-aggregate the fact to the join grain (`production_order_id`) *before* joining, then roll up.
-
-# METADATA ********************
-
-# META {
-# META   "language": "python",
-# META   "language_group": "synapse_pyspark"
-# META }
 
 # CELL ********************
 
@@ -436,9 +446,7 @@ with benchmark_op("Reduce before join", "before", spark):
         .agg(F.count("*").alias("events"), F.sum("cycle_time_ms").alias("total_cycle_ms"), F.sum("is_defect").alias("defects"))
         .orderBy("status")
     )
-    join_before_rows = join_before_df.collect()
-
-display(spark.createDataFrame(join_before_rows))
+    display(join_before_df)
 
 # METADATA ********************
 
@@ -454,14 +462,11 @@ display(spark.createDataFrame(join_before_rows))
 # =================================================================================================
 
 # Compare the raw event count against the far smaller join-key grain.
-join_before_plan = plan_string(join_before_df)
 print(json.dumps({
     "antiPattern": "join all raw event rows, then aggregate",
     "eventRowsIntoBaselineJoin": TABLE_METRICS["manufacturing_event"]["rows"],
-    "joinKeyGrainRows": events3.select("production_order_id").distinct().count(),
-    "exchangeCount": join_before_plan.count("Exchange"),
+    "joinKeyGrainRows": events3.select("production_order_id").distinct().count()
 }, default=str, indent=2))
-print(join_before_plan[:1600])
 
 # METADATA ********************
 
@@ -476,18 +481,15 @@ print(join_before_plan[:1600])
 # 
 # Pre-aggregate `events3` down to the `production_order_id` grain (sum `cycle_time_ms`, sum `is_defect`, count events) **before** joining `production_order`, then roll the partial sums up by `status`. The business result must match, with far fewer rows shuffled into the join.
 
-# METADATA ********************
-
-# META {
-# META   "language": "python",
-# META   "language_group": "synapse_pyspark"
-# META }
-
 # CELL ********************
 
 # Starter: reduce events to the join grain first, then join.
-join_starter_df = events3.join(orders3, "production_order_id")  # TODO: aggregate events before the join
-print(plan_string(join_starter_df)[:800])
+join_starter_df = (
+    events3.join(orders3, "production_order_id")
+        .groupBy("status")
+        .agg(F.count("*").alias("events"), F.sum("cycle_time_ms").alias("total_cycle_ms"), F.sum("is_defect").alias("defects"))
+)  # TODO: aggregate events before the join to reduce the join count
+display(join_starter_df)
 
 # METADATA ********************
 
@@ -495,6 +497,30 @@ print(plan_string(join_starter_df)[:800])
 # META   "language": "python",
 # META   "language_group": "synapse_pyspark"
 # META }
+
+# MARKDOWN ********************
+
+# <details>
+#   <summary><strong>🔑 Solution:</strong> Click to reveal</summary>
+# 
+# <br/>
+# 
+# ```python
+# events3_reduced = (
+#     events3.groupBy("production_order_id")
+#     .agg(F.count("*").alias("events"), F.sum("cycle_time_ms").alias("total_cycle_ms"), F.sum("is_defect").alias("defects"))
+# )
+# join_starter_df = (
+#     events3_reduced.join(orders3, "production_order_id")
+#         .groupBy("status")
+#         .agg(F.count("*").alias("events"), F.sum("cycle_time_ms").alias("total_cycle_ms"), F.sum("is_defect").alias("defects"))
+# )
+# display(join_starter_df)
+# ```
+# 
+# </details>
+# 
+# ---
 
 # CELL ********************
 
@@ -514,9 +540,7 @@ with benchmark_op("Reduce before join", "after", spark):
         .agg(F.sum("events").alias("events"), F.sum("total_cycle_ms").alias("total_cycle_ms"), F.sum("defects").alias("defects"))
         .orderBy("status")
     )
-    join_after_rows = join_after_df.collect()
-
-display(spark.createDataFrame(join_after_rows))
+    display(join_after_df)
 
 # METADATA ********************
 
@@ -530,175 +554,20 @@ display(spark.createDataFrame(join_after_rows))
 # ============================================================
 # 3️⃣ CHECK-CHANGES — Compare against baseline
 # ============================================================
+from pyspark.testing import assertDataFrameEqual
 
-# Same business result, far fewer rows shuffled into the join.
-join_before_map = {r["status"]: (r["events"], r["total_cycle_ms"], r["defects"]) for r in join_before_rows}
-join_after_map = {r["status"]: (r["events"], r["total_cycle_ms"], r["defects"]) for r in join_after_rows}
-record_result("3 reduce before join", "after", {
+try:
+    assertDataFrameEqual(join_before_df, join_after_df)
+    result = True
+except:
+    result = False
+
+print(json.dumps({
     "antiPattern": "join raw rows then aggregate",
-    "sameBusinessResult": join_before_map == join_after_map,
+    "sameBusinessResult": result,
     "eventRowsIntoBaselineJoin": TABLE_METRICS["manufacturing_event"]["rows"],
     "rowsIntoFixedJoin": events3.select("production_order_id").distinct().count(),
-})
-
-# METADATA ********************
-
-# META {
-# META   "language": "python",
-# META   "language_group": "synapse_pyspark"
-# META }
-
-# MARKDOWN ********************
-
-# ---
-# 
-# ## Exercise 4 — Redundant double-shuffle aggregation
-# 
-# **Problem:** A per-customer spend query aggregates twice — `groupBy("customer_id", "order_day")` and then `groupBy("customer_id")` — even though only the per-customer total is reported.
-# 
-# **Why it matters:** Each `groupBy` at a new grain adds its own Exchange (shuffle). The intermediate day grain is thrown away, so one of the two shuffles is pure waste.
-# 
-# **Fix in one line:** Aggregate directly at the grain you report — a single `groupBy("customer_id")`.
-
-# METADATA ********************
-
-# META {
-# META   "language": "python",
-# META   "language_group": "synapse_pyspark"
-# META }
-
-# CELL ********************
-
-# ============================================================
-# 4️⃣ BENCHMARK — Capture baseline query time
-# ============================================================
-
-# Baseline: two groupBy passes (customer+day, then customer) cause two shuffles.
-orders4 = spark.table(table_ref("web_order")).selectExpr("web_order.*")
-lines4 = orders4.select(
-    F.col("customer_id"),
-    F.to_date("order_date").alias("order_day"),
-    F.explode("order_lines").alias("line"),
-).withColumn(
-    "line_total",
-    F.coalesce(
-        F.col("line.extended_price").cast("double"),
-        F.col("line.quantity").cast("double") * F.col("line.unit_price").cast("double"),
-        F.lit(0.0),
-    ),
-)
-
-with benchmark_op("Redundant double shuffle", "before", spark):
-    shuffle_before_df = (
-        lines4.groupBy("customer_id", "order_day")
-        .agg(F.sum("line_total").alias("day_spend"), F.count("*").alias("lines"))
-        .groupBy("customer_id")
-        .agg(F.sum("day_spend").alias("total_spend"), F.sum("lines").alias("lines"))
-        .orderBy(F.desc("total_spend"))
-        .limit(10)
-    )
-    shuffle_before_rows = shuffle_before_df.collect()
-
-display(spark.createDataFrame(shuffle_before_rows))
-
-# METADATA ********************
-
-# META {
-# META   "language": "python",
-# META   "language_group": "synapse_pyspark"
-# META }
-
-# CELL ********************
-
-# =================================================================================================
-# 4️⃣ DIAGNOSE — Prove there are two aggregation shuffles for one reported grain
-# =================================================================================================
-
-# Two Exchanges / two HashAggregate stages where one would do.
-shuffle_before_plan = plan_string(shuffle_before_df)
-print(json.dumps({
-    "antiPattern": "groupBy(customer, day) then groupBy(customer) — two shuffles for one result",
-    "exchangeCount": shuffle_before_plan.count("Exchange"),
-    "hashAggregateCount": shuffle_before_plan.count("HashAggregate"),
 }, default=str, indent=2))
-print(shuffle_before_plan[:1600])
-
-# METADATA ********************
-
-# META {
-# META   "language": "python",
-# META   "language_group": "synapse_pyspark"
-# META }
-
-# MARKDOWN ********************
-
-# ### 🎯 Challenge
-# 
-# The intermediate `groupBy("customer_id", "order_day")` is discarded — you only report per-customer totals. Collapse the two aggregations into a single `groupBy("customer_id")`. The result must match, with one fewer Exchange in the plan.
-
-# METADATA ********************
-
-# META {
-# META   "language": "python",
-# META   "language_group": "synapse_pyspark"
-# META }
-
-# CELL ********************
-
-# Starter: collapse the two aggregations into one.
-shuffle_starter_df = (
-    lines4.groupBy("customer_id", "order_day").agg(F.sum("line_total").alias("day_spend"))
-    .groupBy("customer_id").agg(F.sum("day_spend").alias("total_spend"))
-)  # TODO: a single groupBy("customer_id") is enough
-print("Exchanges:", plan_string(shuffle_starter_df).count("Exchange"))
-
-# METADATA ********************
-
-# META {
-# META   "language": "python",
-# META   "language_group": "synapse_pyspark"
-# META }
-
-# CELL ********************
-
-# ==================================================================================================
-# 4️⃣ FIX — Aggregate once at the reported grain
-# ==================================================================================================
-
-# A single groupBy removes the redundant shuffle.
-with benchmark_op("Redundant double shuffle", "after", spark):
-    shuffle_after_df = (
-        lines4.groupBy("customer_id")
-        .agg(F.sum("line_total").alias("total_spend"), F.count("*").alias("lines"))
-        .orderBy(F.desc("total_spend"))
-        .limit(10)
-    )
-    shuffle_after_rows = shuffle_after_df.collect()
-
-display(spark.createDataFrame(shuffle_after_rows))
-
-# METADATA ********************
-
-# META {
-# META   "language": "python",
-# META   "language_group": "synapse_pyspark"
-# META }
-
-# CELL ********************
-
-# ============================================================
-# 4️⃣ CHECK-CHANGES — Compare against baseline
-# ============================================================
-
-# Same totals, one fewer aggregation shuffle.
-shuffle_before_map = {r["customer_id"]: round(float(r["total_spend"] or 0), 4) for r in shuffle_before_rows}
-shuffle_after_map = {r["customer_id"]: round(float(r["total_spend"] or 0), 4) for r in shuffle_after_rows}
-record_result("4 redundant double shuffle", "after", {
-    "antiPattern": "two groupBy passes for one grouping level",
-    "sameBusinessResult": shuffle_before_map == shuffle_after_map,
-    "baselineExchanges": plan_string(shuffle_before_df).count("Exchange"),
-    "fixedExchanges": plan_string(shuffle_after_df).count("Exchange"),
-})
 
 # METADATA ********************
 
@@ -711,156 +580,7 @@ record_result("4 redundant double shuffle", "after", {
 
 # ---
 # 
-# ## Exercise 5 — Unnecessary global sort
-# 
-# **Problem:** An aggregation is preceded by `orderBy("timestamp")` over the *entire* `manufacturing_event` dataset, even though the aggregate does not depend on row order.
-# 
-# **Why it matters:** A global `orderBy` adds a full `Sort` plus a shuffle `Exchange`. Aggregations are order-insensitive, so that sort is wasted work.
-# 
-# **Fix in one line:** Drop the global sort; sort only the small final result if a presentation order is needed.
-
-# METADATA ********************
-
-# META {
-# META   "language": "python",
-# META   "language_group": "synapse_pyspark"
-# META }
-
-# CELL ********************
-
-# ============================================================
-# 5️⃣ BENCHMARK — Capture baseline query time
-# ============================================================
-
-# Baseline: a global orderBy() before an order-insensitive aggregate.
-events5 = spark.table(table_ref("manufacturing_event")).select(
-    F.col("manufacturing_event.machine_id").alias("machine_id"),
-    F.col("manufacturing_event.timestamp").alias("timestamp"),
-    F.col("manufacturing_event.cycle_time_ms").alias("cycle_time_ms"),
-)
-
-with benchmark_op("Unnecessary global sort", "before", spark):
-    sort_before_df = (
-        events5.orderBy(F.col("timestamp"))
-        .groupBy("machine_id")
-        .agg(F.count("*").alias("events"), F.avg("cycle_time_ms").alias("avg_cycle_ms"))
-        .orderBy("machine_id")
-    )
-    sort_before_rows = sort_before_df.collect()
-
-display(spark.createDataFrame(sort_before_rows))
-
-# METADATA ********************
-
-# META {
-# META   "language": "python",
-# META   "language_group": "synapse_pyspark"
-# META }
-
-# CELL ********************
-
-# =================================================================================================
-# 5️⃣ DIAGNOSE — Prove the pre-aggregation global sort is wasted work
-# =================================================================================================
-
-# The full-dataset Sort + Exchange add nothing to an order-insensitive aggregate.
-sort_before_plan = plan_string(sort_before_df)
-print(json.dumps({
-    "antiPattern": "global orderBy() before an order-insensitive aggregate",
-    "sortNodes": sort_before_plan.count("Sort "),
-    "exchangeCount": sort_before_plan.count("Exchange"),
-}, default=str, indent=2))
-print(sort_before_plan[:1600])
-
-# METADATA ********************
-
-# META {
-# META   "language": "python",
-# META   "language_group": "synapse_pyspark"
-# META }
-
-# MARKDOWN ********************
-
-# ### 🎯 Challenge
-# 
-# Remove the `orderBy("timestamp")` that sorts every event row before the aggregation. Keep only the small final `orderBy("machine_id")` for presentation. The aggregate must match, with one fewer `Sort` + `Exchange` in the plan.
-
-# METADATA ********************
-
-# META {
-# META   "language": "python",
-# META   "language_group": "synapse_pyspark"
-# META }
-
-# CELL ********************
-
-# Starter: is the pre-aggregation sort needed?
-sort_starter_df = (
-    events5.orderBy(F.col("timestamp"))  # TODO: an aggregate does not need sorted input
-    .groupBy("machine_id").agg(F.count("*").alias("events"))
-)
-print("Sort nodes:", plan_string(sort_starter_df).count("Sort "))
-
-# METADATA ********************
-
-# META {
-# META   "language": "python",
-# META   "language_group": "synapse_pyspark"
-# META }
-
-# CELL ********************
-
-# ==================================================================================================
-# 5️⃣ FIX — Aggregate without the global pre-sort
-# ==================================================================================================
-
-# Only the small final result is ordered, for presentation.
-with benchmark_op("Unnecessary global sort", "after", spark):
-    sort_after_df = (
-        events5
-        .groupBy("machine_id")
-        .agg(F.count("*").alias("events"), F.avg("cycle_time_ms").alias("avg_cycle_ms"))
-        .orderBy("machine_id")
-    )
-    sort_after_rows = sort_after_df.collect()
-
-display(spark.createDataFrame(sort_after_rows))
-
-# METADATA ********************
-
-# META {
-# META   "language": "python",
-# META   "language_group": "synapse_pyspark"
-# META }
-
-# CELL ********************
-
-# ============================================================
-# 5️⃣ CHECK-CHANGES — Compare against baseline
-# ============================================================
-
-# Same aggregate, one fewer Sort + Exchange.
-sort_before_map = {r["machine_id"]: (r["events"], round(float(r["avg_cycle_ms"] or 0), 4)) for r in sort_before_rows}
-sort_after_map = {r["machine_id"]: (r["events"], round(float(r["avg_cycle_ms"] or 0), 4)) for r in sort_after_rows}
-record_result("5 unnecessary global sort", "after", {
-    "antiPattern": "global orderBy before an order-insensitive aggregate",
-    "sameBusinessResult": sort_before_map == sort_after_map,
-    "baselineSortNodes": plan_string(sort_before_df).count("Sort "),
-    "fixedSortNodes": plan_string(sort_after_df).count("Sort "),
-})
-
-# METADATA ********************
-
-# META {
-# META   "language": "python",
-# META   "language_group": "synapse_pyspark"
-# META }
-
-# MARKDOWN ********************
-
-# ---
-# 
-# ## Exercise 6 — Cartesian / missing join key
+# ## Exercise 4 — Cartesian / missing join key
 # 
 # **Problem:** A pass-rate query combines `quality_inspection` with `production_order` without the production-order join key. A related cycle-time query uses an inequality self-join when it really needs the previous event per machine.
 # 
@@ -871,7 +591,7 @@ record_result("5 unnecessary global sort", "after", {
 # CELL ********************
 
 # ============================================================
-# 6️⃣ BENCHMARK — Capture baseline query time
+# 4️⃣ BENCHMARK — Capture baseline query time
 # ============================================================
 
 # The baseline omits the equality key and creates N × M join work.
@@ -902,9 +622,7 @@ with benchmark_op("Cartesian Join", "before", spark):
         )
         .orderBy(F.desc("joined_rows"))
     )
-    cartesian_before_pdf = result_cartesian_before.toPandas()
-
-display(cartesian_before_pdf)
+    display(result_cartesian_before)
 
 # METADATA ********************
 
@@ -916,7 +634,7 @@ display(cartesian_before_pdf)
 # CELL ********************
 
 # =================================================================================================
-# 6️⃣ DIAGNOSE — Prove the root cause is a Cartesian or nested-loop join
+# 4️⃣ DIAGNOSE — Prove the root cause is a Cartesian or nested-loop join
 # =================================================================================================
 
 # Inspect the executed plan and compare expected pair counts with displayed results.
@@ -971,7 +689,7 @@ display(starter_join_preview)
 # CELL ********************
 
 # ==================================================================================================
-# 6️⃣ FIX — Add the production_order_id equality join condition
+# 4️⃣ FIX — Add the production_order_id equality join condition
 # ==================================================================================================
 
 # The fixed query joins inspections to production orders by the real key.
@@ -987,9 +705,7 @@ with benchmark_op("Cartesian Join", "after", spark):
         )
         .orderBy(F.desc("joined_rows"))
     )
-    cartesian_after_pdf = result_cartesian_after.toPandas()
-
-display(cartesian_after_pdf)
+    display(result_cartesian_after)
 
 # METADATA ********************
 
@@ -1001,7 +717,7 @@ display(cartesian_after_pdf)
 # CELL ********************
 
 # ============================================================
-# 6️⃣ CHECK-CHANGES — Compare against baseline
+# 4️⃣ CHECK-CHANGES — Compare against baseline
 # ============================================================
 
 # Confirm the fixed plan uses a real equi-join and processes matched rows only.
@@ -1012,66 +728,14 @@ cartesian_after_join = (
     else "ShuffledHashJoin" if "ShuffledHashJoin" in cartesian_after_plan
     else "None"
 )
-record_result("cartesian_join", "after", {
+print(json.dumps({
     "antiPattern": "Missing join predicate / Cartesian join",
     "baselineJoin": cartesian_before_evidence["executedJoin"],
     "fixedJoin": cartesian_after_join,
-    "baselineResultRows": len(cartesian_before_pdf),
-    "fixedResultRows": len(cartesian_after_pdf),
     "improvement": "Added equality join on production_order_id instead of crossJoin.",
-})
-result_cartesian_after.explain(mode="formatted")
-
-# METADATA ********************
-
-# META {
-# META   "language": "python",
-# META   "language_group": "synapse_pyspark"
-# META }
-
-# CELL ********************
-
-# Related code fix: inequality self-join for previous event should be a window function.
-print("🔎 Diagnosing the cycle-time self-join variant without executing the Cartesian action...\n")
-
-cycle_events = mfg.select("machine_id", "timestamp", "cycle_time_ms").filter(
-    F.to_date("timestamp") == F.lit(latest_day)
-)
-a = cycle_events.alias("a")
-b = cycle_events.alias("b")
-
-bad_cycle_join = a.join(b, F.col("b.timestamp") < F.col("a.timestamp")).select(
-    F.col("a.machine_id"),
-    F.col("a.timestamp"),
-    (F.col("a.cycle_time_ms") - F.col("b.cycle_time_ms")).alias("delta_ms"),
-)
-
-bad_cycle_plan = plan_string(bad_cycle_join)
-cycle_rows = cycle_events.count()
-print(json.dumps({
-    "antiPattern": "Inequality self-join instead of previous-row window",
-    "filteredRows": cycle_rows,
-    "estimatedPairs": cycle_rows * cycle_rows,
-    "planHasCartesianSignal": "CartesianProduct" in bad_cycle_plan or "BroadcastNestedLoopJoin" in bad_cycle_plan,
 }, default=str, indent=2))
-bad_cycle_join.explain(mode="formatted")
 
-w = Window.partitionBy("machine_id").orderBy("timestamp")
-with benchmark_op("Cartesian Window Rewrite", "after", spark):
-    fixed_cycle_delta = (
-        cycle_events
-        .withColumn("prev_cycle_time_ms", F.lag("cycle_time_ms").over(w))
-        .withColumn("delta_ms", F.col("cycle_time_ms") - F.col("prev_cycle_time_ms"))
-        .filter(F.col("delta_ms").isNotNull())
-    )
-    fixed_cycle_count = fixed_cycle_delta.count()
-record_result("cartesian_window_rewrite", "after", {
-    "antiPattern": "Inequality self-join instead of previous-row window",
-    "fixedRows": fixed_cycle_count,
-    "planHasCartesianSignal": "CartesianProduct" in plan_string(fixed_cycle_delta),
-    "improvement": "Window lag computes the previous event per machine without creating N x M pairs.",
-})
-fixed_cycle_delta.explain(mode="formatted")
+result_cartesian_after.explain(mode="formatted")
 
 # METADATA ********************
 
@@ -1084,7 +748,7 @@ fixed_cycle_delta.explain(mode="formatted")
 
 # ---
 # 
-# ## Exercise 7 — Python UDFs → native expressions
+# ## Exercise 5 — Python UDFs → native expressions
 # 
 # **Problem:** A top-customer spend query computes line totals and order days with scalar Python UDFs.
 # 
@@ -1092,19 +756,12 @@ fixed_cycle_delta.explain(mode="formatted")
 # 
 # **Fix in one line:** Replace the scalar Python UDFs with native Spark SQL expressions.
 # 
-# > Note: Microsoft Fabric's Native Execution Engine (NEE, on by default) runs vectorized Python UDFs natively, so this rewrite is often **not** required. To isolate the code-level delta, this exercise temporarily disables NEE so the JVM Python boundary is visible. Module 3 shows the complementary execution-lever fix: leave the UDF code unchanged and simply enable NEE.
-
-# METADATA ********************
-
-# META {
-# META   "language": "python",
-# META   "language_group": "synapse_pyspark"
-# META }
+# > Note: Microsoft Fabric's Native Execution Engine runs vectorized Python UDFs natively, so this rewrite is often **not** required. To isolate the code-level delta, this exercise temporarily disables NEE so the JVM Python boundary is visible. Module 3 shows the complementary execution-lever fix: leave the UDF code unchanged and simply enable NEE.
 
 # CELL ********************
 
 # ============================================================
-# 7️⃣ BENCHMARK — Baseline Python UDFs on the JVM
+# 5️⃣ BENCHMARK — Baseline Python UDFs on the JVM
 # ============================================================
 
 # NEE is disabled here only to expose the JVM Python boundary; it is restored at the end.
@@ -1163,7 +820,7 @@ display(udf_before_pdf)
 # CELL ********************
 
 # =================================================================================================
-# 7️⃣ DIAGNOSE — Prove the root cause is the JVM Python boundary
+# 5️⃣ DIAGNOSE — Prove the root cause is the JVM Python boundary
 # =================================================================================================
 
 # On the JVM the plan shows BatchEvalPython / PythonUDF and NEE fallback blocks.
@@ -1188,14 +845,7 @@ print(udf_before_plan[:1600])
 
 # ### 🎯 Challenge
 # 
-# Rewrite both UDFs as native Spark expressions: use `coalesce` / arithmetic for the line total and `regexp_extract` (or a date function) for the order day. Re-run and confirm `BatchEvalPython` disappears and the query speeds up — all without NEE.
-
-# METADATA ********************
-
-# META {
-# META   "language": "python",
-# META   "language_group": "synapse_pyspark"
-# META }
+# Both UDFs were rewritten as native Spark expressions (`coalesce` / arithmetic for the line total and `regexp_extract` (or a date function) for the order day). Re-run and confirm `BatchEvalPython` disappears from the plan.
 
 # CELL ********************
 
@@ -1209,7 +859,7 @@ starter_native = exploded_orders8.select(
     ).alias("line_total"),
     F.regexp_extract("order_date", r"(\d{4}-\d{2}-\d{2})", 1).alias("order_day"),
 ).limit(5)
-display(starter_native)
+starter_native.explain(mode="formatted")
 
 # METADATA ********************
 
@@ -1221,7 +871,7 @@ display(starter_native)
 # CELL ********************
 
 # ==================================================================================================
-# 7️⃣ FIX — Native Spark expressions remove the Python boundary (still on the JVM)
+# 5️⃣ FIX — Native Spark expressions remove the Python boundary (still on the JVM)
 # ==================================================================================================
 
 # Native expressions keep execution inside Spark — no JVM↔Python round-trip.
@@ -1256,21 +906,21 @@ display(native_after_pdf)
 # CELL ********************
 
 # ============================================================
-# 7️⃣ CHECK-CHANGES — Compare against baseline and restore the NEE default
+# 5️⃣ CHECK-CHANGES — Compare against baseline 
 # ============================================================
 
-# Same result, Python boundary gone. Restore NEE so the notebook ends on Fabric defaults.
+# Same result, Python boundary gone.
 def _spend_map(pdf):
     return {row["customer_id"]: round(float(row["total_spend"] or 0), 4) for _, row in pdf.iterrows()}
 
 native_after_plan = plan_string(native_after_df)
-record_result("8 python udf -> native", "after", {
+print(json.dumps({
     "antiPattern": "scalar Python UDFs on the JVM",
     "sameBusinessResult": _spend_map(udf_before_pdf) == _spend_map(native_after_pdf),
     "baselineHadBatchEvalPython": "BatchEvalPython" in udf_before_plan or "PythonUDF" in udf_before_plan,
     "fixedHasBatchEvalPython": "BatchEvalPython" in native_after_plan or "PythonUDF" in native_after_plan,
-    "note": "NEE (Fabric default) vectorizes Python UDFs, so this rewrite is often unnecessary — see Module 3",
-})
+    "note": "NEE (Fabric default) vectorizes Python UDFs, so this rewrite is often unnecessary - see Module 3",
+}, default=str, indent=2))
 restore_conf("spark.native.enabled")
 
 # METADATA ********************
@@ -1284,7 +934,7 @@ restore_conf("spark.native.enabled")
 
 # ---
 # 
-# ## Exercise 8 — `withColumn` in a loop → `withColumns`
+# ## Exercise 6 — `withColumn` in a loop → `withColumns`
 # 
 # **Problem:** Feature-engineering code adds many derived columns by chaining `.withColumn()` in a loop — one call per column.
 # 
@@ -1292,17 +942,10 @@ restore_conf("spark.native.enabled")
 # 
 # **Fix in one line:** Add every column in a single `.withColumns({...})` call (Spark 3.3+).
 
-# METADATA ********************
-
-# META {
-# META   "language": "python",
-# META   "language_group": "synapse_pyspark"
-# META }
-
 # CELL ********************
 
 # ============================================================
-# 8️⃣ BENCHMARK — Build many columns by chaining withColumn in a loop
+# 6️⃣ BENCHMARK — Build many columns by chaining withColumn in a loop
 # ============================================================
 
 # Baseline: one .withColumn() per feature nests a Project per column on the driver.
@@ -1310,7 +953,7 @@ events_wc = spark.table(table_ref("manufacturing_event")).select(
     F.col("manufacturing_event.machine_id").alias("machine_id"),
     F.col("manufacturing_event.cycle_time_ms").alias("cycle_time_ms"),
 )
-N_FEATURES = 50
+N_FEATURES = 100
 
 with benchmark_op("withColumn vs withColumns", "before", spark):
     wc_before_df = events_wc
@@ -1330,7 +973,7 @@ print("Columns:", len(wc_before_df.columns), "| Rows:", wc_before_count)
 # CELL ********************
 
 # =================================================================================================
-# 8️⃣ DIAGNOSE — The chained calls create a deep, project-heavy analyzed plan
+# 6️⃣ DIAGNOSE — The chained calls create a deep, project-heavy analyzed plan
 # =================================================================================================
 
 # Count the nested Project nodes the chained withColumn() calls produced.
@@ -1340,7 +983,8 @@ print(json.dumps({
     "featureColumns": N_FEATURES,
     "projectNodesInAnalyzedPlan": wc_before_analyzed.count("Project"),
 }, default=str, indent=2))
-print(wc_before_analyzed[:1200])
+
+print(f"{wc_before_analyzed[:3600]}...")
 
 # METADATA ********************
 
@@ -1355,19 +999,15 @@ print(wc_before_analyzed[:1200])
 # 
 # Replace the loop of `.withColumn()` calls with a single `.withColumns({...})` that maps each new column name to its expression. The result must match, with far fewer `Project` nodes in the analyzed plan.
 
-# METADATA ********************
-
-# META {
-# META   "language": "python",
-# META   "language_group": "synapse_pyspark"
-# META }
-
 # CELL ********************
 
 # Starter: build the {name: expression} mapping, then call withColumns once.
 feature_exprs = {f"feat_{i}": F.col("cycle_time_ms") + F.lit(i) for i in range(N_FEATURES)}
 print("Mapping size:", len(feature_exprs))
 
+wc_starter_df = events_wc # TODO: use withColumns to add 100 feature columns as a single projection
+display(wc_starter_df.limit(5))
+
 # METADATA ********************
 
 # META {
@@ -1375,10 +1015,29 @@ print("Mapping size:", len(feature_exprs))
 # META   "language_group": "synapse_pyspark"
 # META }
 
+# MARKDOWN ********************
+
+# 
+# <details>
+#   <summary><strong>🔑 Solution:</strong> Click to reveal</summary>
+# 
+# <br/>
+# 
+# ```python
+# feature_exprs = {f"feat_{i}": F.col("cycle_time_ms") + F.lit(i) for i in range(N_FEATURES)}
+# 
+# wc_starter_df = events_wc.withColumns(feature_exprs)
+# display(wc_starter_df.limit(5))
+# ```
+# 
+# </details>
+# 
+# ---
+
 # CELL ********************
 
 # ==================================================================================================
-# 8️⃣ FIX — Add all columns in a single withColumns() call
+# 6️⃣ FIX — Add all columns in a single withColumns() call
 # ==================================================================================================
 
 # One withColumns() adds every column in a single projection.
@@ -1399,18 +1058,20 @@ print("Columns:", len(wc_after_df.columns), "| Rows:", wc_after_count)
 # CELL ********************
 
 # ============================================================
-# 8️⃣ CHECK-CHANGES — Same columns/rows, a far simpler analyzed plan
+# 6️⃣ CHECK-CHANGES — Same columns/rows, a far simpler analyzed plan
 # ============================================================
 
 # Identical output, dramatically fewer Project nodes to analyze.
 wc_after_analyzed = wc_after_df._jdf.queryExecution().analyzed().toString()
-record_result("8 withColumn -> withColumns", "after", {
+print(json.dumps({
     "antiPattern": "chained withColumn() in a loop",
     "sameColumns": sorted(wc_before_df.columns) == sorted(wc_after_df.columns),
     "sameRowCount": wc_before_count == wc_after_count,
     "baselineProjectNodes": wc_before_analyzed.count("Project"),
     "fixedProjectNodes": wc_after_analyzed.count("Project"),
-})
+}, default=str, indent=2))
+
+print(f"{wc_before_analyzed[:3600]}...")
 
 # METADATA ********************
 
@@ -1423,7 +1084,7 @@ record_result("8 withColumn -> withColumns", "after", {
 
 # ---
 # 
-# ## Exercise 9 — Driver `collect()` / `toPandas()` and driver OOM
+# ## Exercise 7 — Driver `collect()` / `toPandas()` and driver OOM
 # 
 # **Problem:** The inventory workflow pulls every transaction to the driver with `collect()` and aggregates in Python. `.toPandas()` has the same raw-data movement risk.
 # 
@@ -1434,8 +1095,9 @@ record_result("8 withColumn -> withColumns", "after", {
 # CELL ********************
 
 # ============================================================
-# 9️⃣ BENCHMARK — Capture baseline query time
+# 7️⃣ BENCHMARK — Capture baseline query time
 # ============================================================
+from collections import defaultdict
 
 # The baseline collects every raw transaction to the driver before aggregating.
 print("🐌 Running baseline query with driver-side collect...\n")
@@ -1449,6 +1111,7 @@ print("spark.driver.maxResultSize =", spark.conf.get("spark.driver.maxResultSize
 start = time.time()
 with benchmark_op("Driver Collect", "before", spark):
     collected_inventory = inv.collect()
+
 with benchmark_op("Driver Python Aggregation", "before", spark):
     inventory_by_line = defaultdict(int)
     for row in collected_inventory:
@@ -1475,7 +1138,7 @@ display(driver_result_rows)
 # CELL ********************
 
 # =================================================================================================
-# 9️⃣ DIAGNOSE — Prove the root cause is raw-row transfer to the driver
+# 7️⃣ DIAGNOSE — Prove the root cause is raw-row transfer to the driver
 # =================================================================================================
 
 # Record how many rows crossed to the driver and why that creates OOM risk.
@@ -1525,7 +1188,7 @@ display(starter_signed_inventory.limit(5))
 # CELL ********************
 
 # ==================================================================================================
-# 9️⃣ FIX — Aggregate on executors and collect only the small grouped result
+# 7️⃣ FIX — Aggregate on executors and collect only the small grouped result
 # ==================================================================================================
 
 # Spark computes net inventory by line before the driver receives the display result.
@@ -1538,9 +1201,7 @@ with benchmark_op("Driver Collect", "after", spark):
         .agg(F.sum("signed_quantity").alias("net_quantity"))
         .orderBy(F.desc("net_quantity"))
     )
-    driver_after_pdf = result_driver_after.toPandas()
-
-display(driver_after_pdf)
+    display(result_driver_after)
 
 # METADATA ********************
 
@@ -1552,17 +1213,17 @@ display(driver_after_pdf)
 # CELL ********************
 
 # ============================================================
-# 9️⃣ CHECK-CHANGES — Compare against baseline
+# 7️⃣ CHECK-CHANGES — Compare against baseline
 # ============================================================
 
 # Verify the fixed path collects only the final grouped rows.
-record_result("driver_collect", "after", {
+print(json.dumps({
     "antiPattern": "Driver-side collect and Python aggregation",
     "baselineCollectedRows": driver_before_evidence["collectedRows"],
     "fixedRawRowsCollected": 0,
-    "fixedResultRowsReturnedToDriver": len(driver_after_pdf),
+    "fixedResultRowsReturnedToDriver": result_driver_after.count(),
     "improvement": "Aggregation runs on executors; only the small grouped result reaches the driver.",
-})
+}, default=str, indent=2))
 result_driver_after.explain(mode="formatted")
 
 # METADATA ********************
@@ -1578,6 +1239,7 @@ result_driver_after.explain(mode="formatted")
 # 
 # ## Summary
 # 
-# You fixed four code-level Spark anti-patterns: weak predicate pushdown, Python UDF serialization and NEE fallback, driver-side raw-row collection, and missing/non-equality join logic that created Cartesian work.
+# You experienced seven code-level Spark anti-patterns that result in slower performance and how to address them:
+# 
 # 
 # Carry the same workflow into the next modules: benchmark the symptom, inspect the Spark UI and physical plan, check Delta metadata, change the right lever, and validate the before/after result.
