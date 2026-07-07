@@ -32,7 +32,7 @@
 # 
 # ## What this module teaches
 # 
-# - Fix execution with join strategy, AQE, partition sizing, salting, caching, and streaming state choices.
+# - Fix execution with join strategy, AQE, partition sizing, salting, caching, and native execution choices.
 # - Keep transformation logic and results identical while changing how Spark executes the query.
 # - Use Spark UI stages, physical plans, task skew, and spill metrics to prove the bottleneck.
 # 
@@ -53,9 +53,8 @@
 # | 1. Join strategies / broadcast | High-volume manufacturing events join to small production-order and parts references. | Results stay identical; `SortMergeJoin` becomes `BroadcastHashJoin` and shuffle/sort overhead is removed for small references. |
 # | 2. Skew handling / AQE skew join | One machine dominates the event join key and creates a straggler shuffle partition. | Results stay identical; AQE skew join splits the hot partition and task times rebalance, with manual salting as the fallback. |
 # | 3. Shuffle partition sizing (tiny-task storm) | A KPI rollup runs with a large static shuffle-partition count and AQE coalescing off. | Results stay identical; AQE coalesces the near-empty partitions into right-sized tasks, removing the tiny-task storm. |
-# | 4. Caching / materialization | Multiple dashboard branches repeatedly read and join the same inventory/order base. | Results stay identical; the shared joined base is materialized once and reused through cache hits instead of repeated source scans. |
-# | 5. Streaming state and watermarking | An hourly stateful streaming aggregation runs without an event-time watermark. | Results stay identical; adding a watermark bounds streaming state (`EventTimeWatermark`) so old windows are dropped and memory stays bounded. |
-# | 6. Python UDFs / Native Execution Engine (NEE) | A correct top-customer query uses scalar Python UDFs, slow on the JVM. | Results stay identical; enabling NEE runs the same UDF code natively (no `BatchEvalPython`), removing the Python-boundary slowdown without any code change. |
+# | 4. Caching / materialization | Three dashboards each recompute the same expensive scan-join-aggregate base. | Results stay identical; the aggregated base is materialized once and reused, so the costly shuffle runs a single time instead of once per dashboard. |
+# | 5. Python UDFs / Native Execution Engine (NEE) | A correct top-customer query uses scalar Python UDFs, slow on the JVM. | Results stay identical; enabling NEE runs the same UDF code natively (no `BatchEvalPython`), removing the Python-boundary slowdown without any code change. |
 
 
 # CELL ********************
@@ -85,7 +84,6 @@ for key in [
     "spark.sql.adaptive.coalescePartitions.enabled",
     "spark.sql.autoBroadcastJoinThreshold",
     "spark.sql.shuffle.partitions",
-    "spark.sql.streaming.statefulOperator.checkCorrectness.enabled",
 ]:
     remember_conf(key)
 
@@ -623,7 +621,7 @@ restore_conf("spark.sql.adaptive.coalescePartitions.enabled")
 # 
 # ### Context and problem
 # 
-# A dashboard builds three rollups — by order status, by part material, and by machine — all from the **same** enriched base: inventory transactions joined to production orders and parts. The baseline recomputes that big-fact scan-and-join once per rollup, so the expensive work runs three times. The fix materializes the shared base once and reuses it; every rollup's filters and aggregations stay identical.
+# Three dashboards — by order status, by part material, and by machine — are all built from the **same** expensive intermediate: inventory transactions joined to production orders and parts, then aggregated (a full scan of the large fact plus a shuffle). The baseline recomputes that scan-join-shuffle once per dashboard, so the costly shuffle runs three times. The fix materializes the aggregated base once and reuses it; each dashboard then does a cheap additive roll-up with identical results.
 
 # METADATA ********************
 
@@ -635,11 +633,11 @@ restore_conf("spark.sql.adaptive.coalescePartitions.enabled")
 # CELL ********************
 
 # ============================================================
-# 4️⃣ BENCHMARK — Baseline recomputes the shared enriched base for every rollup
+# 4️⃣ BENCHMARK — Baseline recomputes the expensive aggregated base for every dashboard
 # ============================================================
 
-# Baseline: each dashboard rollup rebuilds the same inventory-order-parts join from scratch.
-set_job("4 baseline repeated joins")
+# Baseline: each dashboard rebuilds the same scan + join + shuffle-aggregate from scratch.
+set_job("4 baseline repeated aggregation")
 q4_orders = spark.table(table_ref("production_order")).select(
     F.col("production_order.production_order_id").alias("reference_id"),
     F.col("production_order.status").alias("order_status"),
@@ -648,31 +646,33 @@ q4_orders = spark.table(table_ref("production_order")).select(
 q4_parts = spark.table(table_ref("parts")).select("part_num", "part_material")
 
 
-def q4_enriched():
-    # The expensive shared base: scan the large fact and join the two dimensions.
+def q4_base_agg():
+    # The expensive shared base: scan the large fact, join two dimensions, then SHUFFLE-aggregate
+    # to a compact grain. This is what every dashboard re-derives in the baseline.
     return (spark.table(table_ref("inventory_transaction"))
         .select("transaction_type", "reference_id", "quantity", "part_num")
         .join(q4_orders, "reference_id", "left")
         .join(q4_parts, "part_num", "left")
-        .select("transaction_type", "quantity", "order_status", "machine_id", "part_material"))
+        .groupBy("machine_id", "part_material", "order_status")
+        .agg(F.sum("quantity").alias("quantity"), F.count("*").alias("transactions")))
 
 
 def q4_by_status(base):
-    return base.groupBy("order_status").agg(F.count("*").alias("transactions"), F.sum("quantity").alias("quantity")).orderBy("order_status")
+    return base.groupBy("order_status").agg(F.sum("transactions").alias("transactions"), F.sum("quantity").alias("quantity")).orderBy("order_status")
 
 
 def q4_by_material(base):
-    return base.groupBy("part_material").agg(F.count("*").alias("transactions"), F.sum("quantity").alias("quantity")).orderBy("part_material")
+    return base.groupBy("part_material").agg(F.sum("transactions").alias("transactions"), F.sum("quantity").alias("quantity")).orderBy("part_material")
 
 
 def q4_by_machine(base):
-    return base.groupBy("machine_id").agg(F.count("*").alias("transactions"), F.sum("quantity").alias("quantity")).orderBy("machine_id")
+    return base.groupBy("machine_id").agg(F.sum("transactions").alias("transactions"), F.sum("quantity").alias("quantity")).orderBy("machine_id")
 
 
 with benchmark_op("Caching / repeated reads", "before", spark):
-    q4_before_status = q4_by_status(q4_enriched()).collect()
-    q4_before_material = q4_by_material(q4_enriched()).collect()
-    q4_before_machine = q4_by_machine(q4_enriched()).collect()
+    q4_before_status = q4_by_status(q4_base_agg()).collect()
+    q4_before_material = q4_by_material(q4_base_agg()).collect()
+    q4_before_machine = q4_by_machine(q4_base_agg()).collect()
 
 display(spark.createDataFrame(q4_before_status))
 
@@ -686,22 +686,22 @@ display(spark.createDataFrame(q4_before_status))
 # CELL ********************
 
 # =================================================================================================
-# 4️⃣ DIAGNOSE — Repeated FileScan operators prove the shared base is recomputed
+# 4️⃣ DIAGNOSE — Repeated FileScan + shuffle prove the aggregated base is recomputed
 # =================================================================================================
 
-# Diagnosis: every rollup re-scans and re-joins the same base; Spark UI Jobs tab shows a job per collect.
+# Diagnosis: every dashboard re-scans, re-joins, and re-shuffles the same base; one job per collect.
 q4_before_plans = [
-    explain_string(q4_by_status(q4_enriched())),
-    explain_string(q4_by_material(q4_enriched())),
-    explain_string(q4_by_machine(q4_enriched())),
+    explain_string(q4_by_status(q4_base_agg())),
+    explain_string(q4_by_material(q4_base_agg())),
+    explain_string(q4_by_machine(q4_base_agg())),
 ]
 q4_file_scans_before = sum(plan.count("FileScan") for plan in q4_before_plans)
 print(json.dumps({
-    "antiPattern": "Recompute the same inventory-order-parts join for every rollup",
+    "antiPattern": "Recompute the same scan-join-shuffle aggregate for every dashboard",
     "dashboards": ["by order_status", "by part_material", "by machine_id"],
     "rollups": len(q4_before_plans),
     "totalFileScanOperatorsAcrossPlans": q4_file_scans_before,
-    "sparkUIPointer": "Jobs tab: every collect re-runs the full scan + join",
+    "sparkUIPointer": "Jobs tab: every collect re-runs the full scan + join + shuffle",
 }, indent=2))
 
 # METADATA ********************
@@ -715,7 +715,7 @@ print(json.dumps({
 
 # ### 🎯 Challenge
 # 
-# Materialize the shared enriched base once, then build all three rollups from the cached DataFrame. The base is reused in full (no per-rollup filter), so caching removes two of the three big-fact scans.
+# Materialize the expensive aggregated base once, then build all three dashboards from the cached DataFrame with cheap additive roll-ups (sum the pre-aggregated counts and quantities). Because the cached result is small, caching runs the costly shuffle a single time instead of three.
 
 # METADATA ********************
 
@@ -726,9 +726,9 @@ print(json.dumps({
 
 # CELL ********************
 
-# Challenge starter: this enriched join is the cache candidate (reused in full by every rollup).
-q4_candidate_base = q4_enriched()
-print("Cache and materialize this enriched base, then aggregate it three different ways.")
+# Challenge starter: this aggregated base is the cache candidate (small output, expensive to build).
+q4_candidate_base = q4_base_agg()
+print("Cache and materialize this aggregated base, then roll it up three different ways.")
 print(explain_string(q4_candidate_base)[:1200])
 
 # METADATA ********************
@@ -741,14 +741,14 @@ print(explain_string(q4_candidate_base)[:1200])
 # CELL ********************
 
 # ==================================================================================================
-# 4️⃣ FIX — Cache and materialize the enriched base once while rollup logic stays unchanged
+# 4️⃣ FIX — Cache and materialize the aggregated base once while roll-up logic stays unchanged
 # ==================================================================================================
 
-# ✅ Solution: materialize the shared base once, then reuse it for all three rollups.
-set_job("4 solution cache enriched base")
+# ✅ Solution: materialize the expensive aggregate once, then reuse it for all three dashboards.
+set_job("4 solution cache aggregated base")
 q4_after_plans = []
 with benchmark_op("Caching / repeated reads", "after", spark):
-    q4_cached_base = q4_enriched().persist(StorageLevel.MEMORY_AND_DISK)
+    q4_cached_base = q4_base_agg().persist(StorageLevel.MEMORY_AND_DISK)
     q4_cached_base.count()
     q4_status_df = q4_by_status(q4_cached_base)
     q4_material_df = q4_by_material(q4_cached_base)
@@ -774,7 +774,7 @@ q4_cached_base.unpersist()
 # 4️⃣ CHECK-CHANGES — Compare against baseline (results identical)
 # ============================================================
 
-# Validation: every rollup matches the baseline and now reads from the in-memory cache.
+# Validation: every dashboard matches the baseline and now reads from the in-memory cache.
 def _q4_map(rows, key):
     return {r[key]: (int(r["transactions"]), int(r["quantity"] or 0)) for r in rows}
 
@@ -789,7 +789,7 @@ record_result("4 caching / materialization", "passed" if valid else "failed", {
     "sameBusinessResult": same_result,
     "fileScansBefore": q4_file_scans_before,
     "inMemoryScansAfter": q4_in_memory_scans,
-    "cachedBase": "inventory_transaction joined to production_order and parts",
+    "cachedBase": "aggregated inventory_transaction joined to production_order and parts",
 })
 assert valid, "Exercise 4 validation failed" 
 
@@ -804,180 +804,7 @@ assert valid, "Exercise 4 validation failed"
 
 # ---
 # 
-# ## Exercise 5 — Streaming state and watermarking
-# 
-# ### Context and problem
-# 
-# An hourly machine defect aggregation is a correct **stateful** streaming query, but it has no event-time watermark, so Spark keeps window state forever and memory grows unbounded. Both runs use `trigger(availableNow=True)`, which processes the currently-available data in micro-batches and then stops, so the notebook stays bounded. The fix adds a two-hour watermark so Spark can drop state for windows older than `max_event_time - 2 hours`.
-
-# METADATA ********************
-
-# META {
-# META   "language": "python",
-# META   "language_group": "synapse_pyspark"
-# META }
-
-# CELL ********************
-
-# ============================================================
-# 5️⃣ BENCHMARK — Stateful streaming aggregation WITHOUT a watermark
-# ============================================================
-
-# Baseline: stateful windowed aggregation with no watermark -> unbounded state growth.
-set_job("5 baseline streaming no watermark")
-
-
-def q5_stream_source():
-    return (spark.readStream.option("maxFilesPerTrigger", 15).table(table_ref("manufacturing_event"))
-        .select(
-            F.to_timestamp(F.col("manufacturing_event.timestamp")).alias("event_ts"),
-            F.col("manufacturing_event.machine_id").alias("machine_id"),
-            F.col("manufacturing_event.defect_detected").cast("int").alias("is_defect"),
-        ))
-
-
-def q5_state_metrics(q):
-    lp = q.lastProgress or {}
-    ops = lp.get("stateOperators") or [{}]
-    op = ops[0] if ops else {}
-    return (op.get("memoryUsedBytes"), op.get("numRowsTotal"), op.get("numRowsDroppedByWatermark"))
-
-
-q5_before_stream = (q5_stream_source()
-    .groupBy(F.window("event_ts", "1 hour"), "machine_id")
-    .agg(F.count("*").alias("events"), F.sum("is_defect").alias("defects")))
-q5_before_plan = explain_string(q5_before_stream)
-
-q5_before_ckpt = f"Files/{WORK_SCHEMA}/checkpoints/stream_before_{spark.sparkContext.applicationId}"
-with benchmark_op("Streaming state / watermark", "before", spark):
-    q5_before_query = (q5_before_stream.writeStream
-        .trigger(availableNow=True)
-        .option("checkpointLocation", q5_before_ckpt)
-        .format("memory").queryName("m3_defects_before").outputMode("update").start())
-    q5_before_query.awaitTermination()
-
-q5_before_mem, q5_before_rows_total, q5_before_dropped = q5_state_metrics(q5_before_query)
-print(f"State memory (no watermark): {(q5_before_mem or 0) / (1024 * 1024):.2f} MB | rowsTotal: {q5_before_rows_total} | droppedByWatermark: {q5_before_dropped}")
-
-# METADATA ********************
-
-# META {
-# META   "language": "python",
-# META   "language_group": "synapse_pyspark"
-# META }
-
-# CELL ********************
-
-# =================================================================================================
-# 5️⃣ DIAGNOSE — No EventTimeWatermark, so window state is never dropped
-# =================================================================================================
-
-# Diagnosis: the streaming plan has no watermark bound on the stateful aggregation.
-print(json.dumps({
-    "isStreaming": q5_before_stream.isStreaming,
-    "hasWatermark": "EventTimeWatermark" in q5_before_plan,
-    "statefulAggregation": "Aggregate" in q5_before_plan,
-    "sparkUIPointer": "Structured Streaming > stateOperators: memoryUsedBytes, numRowsTotal, numRowsDroppedByWatermark",
-}, indent=2))
-
-# METADATA ********************
-
-# META {
-# META   "language": "python",
-# META   "language_group": "synapse_pyspark"
-# META }
-
-# MARKDOWN ********************
-
-# ### 🎯 Challenge
-# 
-# Keep the same hourly aggregation. Add `.withWatermark("event_ts", "2 hours")` before the `groupBy` so Spark can drop state for windows older than `max_event_time - 2 hours`. Choose a processing-time trigger and a durable checkpoint path for a real deployment.
-
-# METADATA ********************
-
-# META {
-# META   "language": "python",
-# META   "language_group": "synapse_pyspark"
-# META }
-
-# CELL ********************
-
-# Challenge starter: document the runtime choices for a real streaming write.
-q5_watermark_delay = "2 hours"
-q5_trigger_interval = "1 minute"
-print(json.dumps({"watermarkDelay": q5_watermark_delay, "triggerIntervalForRealRun": q5_trigger_interval}, indent=2))
-
-# METADATA ********************
-
-# META {
-# META   "language": "python",
-# META   "language_group": "synapse_pyspark"
-# META }
-
-# CELL ********************
-
-# ==================================================================================================
-# 5️⃣ FIX — Add a two-hour event-time watermark; the aggregation is unchanged
-# ==================================================================================================
-
-# ✅ Solution: bound state with a watermark so old windows are cleaned up.
-set_job("5 solution streaming watermark")
-
-q5_after_stream = (q5_stream_source()
-    .withWatermark("event_ts", q5_watermark_delay)
-    .groupBy(F.window("event_ts", "1 hour"), "machine_id")
-    .agg(F.count("*").alias("events"), F.sum("is_defect").alias("defects")))
-q5_after_plan = explain_string(q5_after_stream)
-
-q5_after_ckpt = f"Files/{WORK_SCHEMA}/checkpoints/stream_after_{spark.sparkContext.applicationId}"
-with benchmark_op("Streaming state / watermark", "after", spark):
-    q5_after_query = (q5_after_stream.writeStream
-        .trigger(availableNow=True)
-        .option("checkpointLocation", q5_after_ckpt)
-        .format("memory").queryName("m3_defects_after").outputMode("update").start())
-    q5_after_query.awaitTermination()
-
-q5_after_mem, q5_after_rows_total, q5_after_dropped = q5_state_metrics(q5_after_query)
-print(f"State memory (2h watermark): {(q5_after_mem or 0) / (1024 * 1024):.2f} MB | rowsTotal: {q5_after_rows_total} | droppedByWatermark: {q5_after_dropped}")
-print(q5_after_plan[:1200])
-
-# METADATA ********************
-
-# META {
-# META   "language": "python",
-# META   "language_group": "synapse_pyspark"
-# META }
-
-# CELL ********************
-
-# ============================================================
-# 5️⃣ CHECK-CHANGES — Watermark now bounds streaming state
-# ============================================================
-
-# Validation: the fixed streaming plan has an EventTimeWatermark; the baseline did not.
-valid = (q5_before_stream.isStreaming and q5_after_stream.isStreaming
-    and "EventTimeWatermark" not in q5_before_plan and "EventTimeWatermark" in q5_after_plan)
-record_result("5 streaming state / watermark", "passed" if valid else "failed", {
-    "beforeHasWatermark": "EventTimeWatermark" in q5_before_plan,
-    "afterHasWatermark": "EventTimeWatermark" in q5_after_plan,
-    "beforeStateMemoryMB": round((q5_before_mem or 0) / (1024 * 1024), 2),
-    "afterStateMemoryMB": round((q5_after_mem or 0) / (1024 * 1024), 2),
-    "afterRowsDroppedByWatermark": q5_after_dropped,
-})
-assert valid, "Exercise 5 validation failed"
-
-# METADATA ********************
-
-# META {
-# META   "language": "python",
-# META   "language_group": "synapse_pyspark"
-# META }
-
-# MARKDOWN ********************
-
-# ---
-# 
-# ## Exercise 6 — Python UDFs and the Native Execution Engine (NEE)
+# ## Exercise 5 — Python UDFs and the Native Execution Engine (NEE)
 # 
 # ### Context and problem
 # 
@@ -986,7 +813,7 @@ assert valid, "Exercise 5 validation failed"
 # CELL ********************
 
 # ============================================================
-# 6️⃣ BENCHMARK — Same UDF code with NEE disabled (JVM execution)
+# 5️⃣ BENCHMARK — Same UDF code with NEE disabled (JVM execution)
 # ============================================================
 
 # Disable NEE to reproduce the historical Python-UDF regression on the JVM.
@@ -1048,7 +875,7 @@ display(q6_before_pdf)
 # CELL ********************
 
 # =================================================================================================
-# 6️⃣ DIAGNOSE — Prove the Python boundary and NEE fallback under JVM execution
+# 5️⃣ DIAGNOSE — Prove the Python boundary and NEE fallback under JVM execution
 # =================================================================================================
 
 # With NEE off, the plan shows BatchEvalPython / PythonUDF and NEE fallback blocks.
@@ -1092,7 +919,7 @@ print("Attempt has BatchEvalPython:", "BatchEvalPython" in plan_string(q6_attemp
 # CELL ********************
 
 # ==================================================================================================
-# 6️⃣ FIX — Enable NEE (the default); the same UDF code now runs natively
+# 5️⃣ FIX — Enable NEE (the default); the same UDF code now runs natively
 # ==================================================================================================
 
 # No code change — just turn the engine on.
@@ -1114,7 +941,7 @@ display(q6_after_pdf)
 # CELL ********************
 
 # ============================================================
-# 6️⃣ CHECK-CHANGES — Same code and result; the engine provides the speedup
+# 5️⃣ CHECK-CHANGES — Same code and result; the engine provides the speedup
 # ============================================================
 
 def _spend_map6(pdf):
@@ -1123,13 +950,13 @@ def _spend_map6(pdf):
 q6_after_plan = plan_string(q6_after_df)
 same_result = _spend_map6(q6_before_pdf) == _spend_map6(q6_after_pdf)
 valid = same_result
-record_result("6 python UDFs / NEE engine", "passed" if valid else "failed", {
+record_result("5 python UDFs / NEE engine", "passed" if valid else "failed", {
     "lesson": "Enabling NEE runs the same Python-UDF code natively — no rewrite required",
     "sameBusinessResult": same_result,
     "neeOffHadBatchEvalPython": "BatchEvalPython" in q6_before_plan or "PythonUDF" in q6_before_plan,
     "neeOnHasBatchEvalPython": "BatchEvalPython" in q6_after_plan or "PythonUDF" in q6_after_plan,
 })
-assert valid, "Exercise 6 validation failed"
+assert valid, "Exercise 5 validation failed"
 restore_conf("spark.native.enabled")
 
 # METADATA ********************
@@ -1150,9 +977,8 @@ restore_conf("spark.native.enabled")
 # 1. **Join strategy / broadcast** — replaced sort-merge shuffle with broadcast hash joins for small references.
 # 2. **Skew handling / AQE skew join** — diagnosed a hot-key straggler and let AQE split the hot partition (salting as the manual fallback).
 # 3. **Shuffle partition sizing** — re-enabled AQE coalescing to merge a static over-partitioned shuffle into right-sized tasks.
-# 4. **Caching / materialization** — cached the reused prepared branch after expensive joins/aggregation.
-# 5. **Streaming state and watermarking** — added an event-time watermark so Spark drops old window state and memory stays bounded.
-# 6. **Python UDFs / NEE** — enabled the Native Execution Engine so the same Python-UDF code runs natively, with no rewrite.
+# 4. **Caching / materialization** — materialized an expensive aggregated base once and reused it across dashboards, running the costly shuffle a single time.
+# 5. **Python UDFs / NEE** — enabled the Native Execution Engine so the same Python-UDF code runs natively, with no rewrite.
 
 
 # CELL ********************
@@ -1165,7 +991,7 @@ print(json.dumps(summary, indent=2, sort_keys=True, default=str))
 print("OPT_EXEC_FINAL_SUMMARY_END")
 for key in list(_ORIGINAL_CONF.keys()):
     restore_conf(key)
-assert len(results) == 6, f"Expected 6 exercise validations, got {len(results)}"
+assert len(results) == 5, f"Expected 5 exercise validations, got {len(results)}"
 assert not failed, f"Failed validations: {failed}"
 
 # METADATA ********************
