@@ -9,7 +9,7 @@
 # META   "dependencies": {
 # META     "lakehouse": {
 # META       "default_lakehouse": "28f1e957-ea23-49e8-846b-be0d8a67412e",
-# META       "default_lakehouse_name": "lego",
+# META       "default_lakehouse_name": "toy_bricks",
 # META       "default_lakehouse_workspace_id": "7fc5eff4-7153-4da9-b909-54981a3ffcdb",
 # META       "known_lakehouses": [
 # META         {
@@ -26,7 +26,7 @@
 
 # MARKDOWN ********************
 
-# # 🧱 **Module 2: Delta Table Design & Optimization**
+# # **Module 2: Delta Table Design & Optimization**
 # 
 # Learn how to identify common Delta table performance problems, apply the right optimization, and validate the impact with before-and-after benchmarks.
 # 
@@ -144,134 +144,6 @@ for table in LAB_TABLES:
 print(f"\n📌 All exercises will use schema: {FAST_SCHEMA}")
 print(f"   Original tables in '{ORIG_SCHEMA}' are preserved for re-runs.")
 
-
-# METADATA ********************
-
-# META {
-# META   "language": "python",
-# META   "language_group": "synapse_pyspark"
-# META }
-
-# MARKDOWN ********************
-
-# ### 🔍 Before We Tune: Let's See the Data
-# 
-# Before diving into configuration, let's peek at what we're working with. This is **real LEGO catalog data** — actual sets and themes that are combined with synthetic manufacturing and sales events.
-
-# CELL ********************
-
-# What LEGO sets are people ordering?
-print("🧱 Top 10 Most-Ordered LEGO Sets\n")
-display(spark.sql(f"""
-    SELECT s.name AS set_name, s.set_num, t.name AS theme, s.year, s.num_parts,
-           COUNT(*) AS times_ordered, ROUND(SUM(wol.extended_price), 2) AS total_revenue
-    FROM {ORIG_SCHEMA}.web_order_line wol
-    JOIN {ORIG_SCHEMA}.sets s ON wol.set_num = s.set_num
-    LEFT JOIN {ORIG_SCHEMA}.themes t ON s.theme_id = t.id
-    GROUP BY s.name, s.set_num, t.name, s.year, s.num_parts
-    ORDER BY times_ordered DESC
-    LIMIT 10
-"""))
-
-# METADATA ********************
-
-# META {
-# META   "language": "python",
-# META   "language_group": "synapse_pyspark"
-# META }
-
-# CELL ********************
-
-# What's happening on the factory floor?
-print("\n🏭 Manufacturing Defect Breakdown\n")
-display(spark.sql(f"""
-    SELECT defect_type, COUNT(*) AS defect_count,
-           ROUND(COUNT(*) * 100.0 / SUM(COUNT(*)) OVER(), 1) AS pct
-    FROM {ORIG_SCHEMA}.manufacturing_event
-    WHERE defect_detected = true
-    GROUP BY defect_type
-    ORDER BY defect_count DESC
-"""))
-
-# METADATA ********************
-
-# META {
-# META   "language": "python",
-# META   "language_group": "synapse_pyspark"
-# META }
-
-# MARKDOWN ********************
-
-# ---
-# 
-# # Warm-up: The Cost of Schema Inference
-# 
-# Before we even run queries, notice how long it takes to simply **discover the schema** from the landing zone. With thousands of small files, Spark must open many of them to infer column types — this is a hidden startup cost every time the pipeline restarts.
-# 
-# **Production best practice:** Define schemas statically so your pipeline starts instantly — no file scanning needed.
-# 
-# ---
-
-# CELL ********************
-
-# ============================================================
-# WARM-UP — Time schema inference on the landing zone
-# ============================================================
-
-# The unoptimized pipeline left thousands of small files in the landing zone.
-# Schema inference must scan these files to discover the schema.
-#
-# NOTE: spark.read.json() triggers inference EAGERLY at creation time,
-# so we must time the DataFrame construction itself — not an action.
-
-LANDING_TABLE = "manufacturing_event"
-landing_path = f"Files/landing/{LANDING_TABLE}"
-
-print(f"🐌 Inferring schema from landing zone: {landing_path}\n")
-print("   Spark must open files and read metadata to discover columns + types...\n")
-
-with benchmark_op("Schema Inference", "inferred (file scan)", spark):
-    inferred_df = spark.read.option("multiline", "true").json(landing_path)
-
-inferred_df.printSchema()
-
-# METADATA ********************
-
-# META {
-# META   "language": "python",
-# META   "language_group": "synapse_pyspark"
-# META }
-
-# CELL ********************
-
-# ============================================================
-# WARM-UP — Compare: static schema definition (instant)
-# ============================================================
-from pyspark.sql.types import StructType, StructField, StringType, TimestampType, IntegerType, BooleanType, DecimalType
-
-# A production pipeline defines the schema once in code — no file scanning needed
-static_schema = StructType([
-    StructField("EventId", StringType()),
-    StructField("Timestamp", TimestampType()),
-    StructField("MachineId", StringType()),
-    StructField("PartNum", StringType()),
-    StructField("ColorId", IntegerType()),
-    StructField("MoldTemp", DecimalType(5, 1)),
-    StructField("InjectionPressure", DecimalType(6, 1)),
-    StructField("CycleTimeMs", IntegerType()),
-    StructField("DefectDetected", BooleanType()),
-    StructField("DefectType", StringType()),
-    StructField("BatchId", StringType()),
-])
-
-with benchmark_op("Schema Inference", "static (no scan)", spark):
-    static_df = spark.read.schema(static_schema).json(landing_path)
-
-static_df.printSchema()
-
-print("\n📝 Takeaway: production pipelines define schemas upfront.")
-print("   Inference is convenient for exploration but adds startup latency,")
-print("   especially when scanning thousands of small files.")
 
 # METADATA ********************
 
@@ -1422,11 +1294,10 @@ with benchmark_op("Data Skipping Stats", "after (stats + clustering)", spark):
 
 # ---
 # 
-# # 🏆 Summary Dashboard
+# # 🏆 Performance Impact by Exercise
 # 
-# All five optimizations applied. Here's the full impact across every exercise.
+# Execute the below to see the full impact across every exercise.
 # 
-# ---
 
 
 # CELL ********************
@@ -1435,48 +1306,7 @@ with benchmark_op("Data Skipping Stats", "after (stats + clustering)", spark):
 # SUMMARY — All benchmark results
 # ============================================================
 
-print("=" * 62)
-print("  🏆  PERFORMANCE IMPACT SUMMARY")
-print("=" * 62)
-
-for scenario, states in benchmarks.items():
-    if isinstance(states, dict):
-        baseline_key = next(iter(states))
-        baseline_ms = states[baseline_key]
-        best_ms = min(states.values())
-        W = 58
-        print(f"\n  \u250c{'\u2500' * W}\u2510")
-        title = f"\033[1m{scenario}\033[0m"
-        title_pad = W - 2 - len(scenario)
-        print(f"  \u2502  {title}{' ' * title_pad}\u2502")
-        print(f"  \u251c{'\u2500' * W}\u2524")
-        print(f"  \u2502  {'State':<28}{'Time (ms)':>12}{'Factor':>14}  \u2502")
-        print(f"  \u251c{'\u2500' * W}\u2524")
-        for s, ms in states.items():
-            ratio = baseline_ms / max(ms, 0.001)
-            if s == baseline_key:
-                visible_tag = "baseline"
-                tag = visible_tag
-            elif ms <= best_ms:
-                visible_tag = f"{ratio:.1f}x faster"
-                tag = f"\033[1;32m{visible_tag}\033[0m"
-            else:
-                visible_tag = f"{ratio:.1f}x"
-                tag = f"\033[1;34m{visible_tag}\033[0m"
-            pad = 14 - len(visible_tag)
-            print(f"  \u2502  {s:<28}{ms:>12.2f}{' ' * pad}{tag}  \u2502")
-        print(f"  \u2514{'\u2500' * W}\u2518")
-
-print(f"\n{'=' * 62}")
-print("""
-KEY TAKEAWAYS
-──────────────
-1. OPTIMIZE compacts small files — but it's REACTIVE (run after the damage)
-2. Optimize Write bin-packs at write time — PROACTIVE, prevents small files at source
-3. Liquid clustering enables data skipping — selective queries skip irrelevant files
-4. Deletion vectors eliminate write amplification — DELETEs don't rewrite files
-5. Data skipping stats must cover filter columns — wide tables need explicit config
-""")
+print_benchmark_summary()
 
 # METADATA ********************
 
@@ -1484,6 +1314,16 @@ KEY TAKEAWAYS
 # META   "language": "python",
 # META   "language_group": "synapse_pyspark"
 # META }
+
+# MARKDOWN ********************
+
+# ### KEY TAKEAWAYS
+# 
+# 1. OPTIMIZE compacts small files — but it's REACTIVE (run after the damage)
+# 2. Optimize Write bin-packs at write time — PROACTIVE, prevents small files at source
+# 3. Liquid clustering enables data skipping — selective queries skip irrelevant files
+# 4. Deletion vectors eliminate write amplification — DELETEs don't rewrite files
+# 5. Data skipping stats must cover filter columns — wide tables need explicit config
 
 # MARKDOWN ********************
 
@@ -1500,8 +1340,6 @@ KEY TAKEAWAYS
 # | `targetFileSize.adaptive.enabled` | `true` | Adapts target file size to workload |
 # | `enableDeletionVectors` | `true` | Marks deleted rows instead of rewriting files |
 # | `optimize.fast.enabled` | `true` | Faster OPTIMIZE via incremental compaction |
-# | `parquet.compression.codec` | `zstd` | Better compression ratio than snappy |
-# | `sql.adaptive.enabled` | `true` | Adaptive Query Execution (AQE) |
 # | `native.enabled` | `true` | Native Execution Engine |
 # 
 # > 💡 **The best optimization is the one you never have to run manually.**

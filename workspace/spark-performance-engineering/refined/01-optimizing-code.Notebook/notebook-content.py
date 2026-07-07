@@ -32,7 +32,7 @@
 # 
 # ## What this module teaches
 # 
-# This module teaches you to recognize and fix **code-level** anti-patterns: the table design and cluster are fine, but the query as written is wrong or wasteful. You will also start using the diagnostic toolkit that Modules 2 and 3 reuse: Spark UI, `explain()` and physical plans, Delta metadata from `DESCRIBE DETAIL` / `DESCRIBE HISTORY`, `inputFiles()`, and Native Execution Engine (NEE) fallback detection.
+# This module teaches you to recognize and fix **code-level** anti-patterns: the table design and cluster are fine, but the query as written is wrong or wasteful. You will also start using the diagnostic toolkit that Modules 2 and 3 reuse: Spark UI, `explain()` and physical plans, Delta metadata from `DESCRIBE DETAIL` / `DESCRIBE HISTORY`, and `inputFiles()`.
 # 
 # > Litmus test: if the fix is a diff to the transformation logic, it belongs here. Storage fixes are Module 2; execution, AQE, caching, and repartitioning fixes are Module 3.
 
@@ -49,7 +49,8 @@
 # | 5 — Cartesian / missing join key | A pass-rate query omits the production-order join key, and a cycle-time variant uses an inequality self-join. | `CartesianProduct` / nested-loop work replaced by equi-join or window logic; runtime and pair counts drop. |
 # | 6 — Python UDFs → native expressions | A top-customer query computes line totals/order days with Python UDFs (NEE disabled to expose the JVM boundary). | `BatchEvalPython` removed after rewriting UDFs as native expressions; NEE makes the rewrite optional (see Module 3). |
 # | 7 — `withColumn` loop → `withColumns` | Feature engineering adds ~50 derived columns by chaining `.withColumn()`, one per column. | Analyzed plan collapses from ~50 nested `Project` nodes to 1; identical columns and rows. |
-# | 8 — Driver `collect()` / `toPandas()` and driver OOM | An inventory workflow collects raw transactions to the driver and aggregates in Python. Run last so a driver crash cannot abort earlier exercises. | Driver result size shrinks / raw-row collect avoided; no OOM risk from full-result transfer. |
+# | 8 — Schema inference vs a declared schema | Reading the JSON landing zone with `spark.read.json()` infers types by scanning the files before the query runs. | Declaring a `StructType` schema removes the eager inference scan; same columns, faster read. |
+# | 9 — Driver `collect()` / `toPandas()` and driver OOM | An inventory workflow collects raw transactions to the driver and aggregates in Python. Run last so a driver crash cannot abort earlier exercises. | Driver result size shrinks / raw-row collect avoided; no OOM risk from full-result transfer. |
 
 
 # CELL ********************
@@ -71,13 +72,10 @@ from pyspark.sql.window import Window
 from pyspark.testing import assertDataFrameEqual
 
 SOURCE_SCHEMA = "bronze"
-WORK_SCHEMA = "opt_code"
 
 # Disable Intelligent Cache to avoid skewing benchmark results
 spark.conf.set("spark.synapse.vegas.useCache", "false")
 spark.catalog.clearCache()
-
-reset_work_schema(WORK_SCHEMA)
 
 expected_tables = [
     "manufacturing_event",
@@ -89,15 +87,12 @@ expected_tables = [
 ]
 require_tables(expected_tables, SOURCE_SCHEMA)
 
-print("Source schema:", SOURCE_SCHEMA, "| Work schema:", WORK_SCHEMA)
 print("\n=== Delta table metrics from DESCRIBE DETAIL ===")
 for table_name in expected_tables:
     show_metrics(table_ref(table_name, SOURCE_SCHEMA), "source")
 
 TABLE_METRICS = {name: table_metrics(name, SOURCE_SCHEMA) for name in expected_tables}
 print(json.dumps(TABLE_METRICS, default=str, indent=2))
-print("Recent manufacturing_event history:")
-print(json.dumps(recent_history("manufacturing_event", SOURCE_SCHEMA), default=str, indent=2))
 
 # METADATA ********************
 
@@ -560,19 +555,9 @@ latest_after.explain(mode="formatted")
 # MARKDOWN ********************
 
 # ## Exercise 4 — One pass, not many (avoid repeated scans)
-#
 # **Problem:** A per-transaction-type report is built by looping over each `transaction_type`, filtering and aggregating `inventory_transaction` once per type, then unioning the results — so the table is scanned once per category.
-#
 # **Why it matters:** Spark is excellent at joins and aggregations, but it will *not* merge independent filtered passes into a single read. Each pass re-scans the table, so the work grows with the number of categories instead of staying a single scan.
-#
 # **Fix in one line:** Compute every bucket in one `groupBy(transaction_type)` (or conditional aggregation) so the table is scanned once.
-
-# METADATA ********************
-
-# META {
-# META   "language": "python",
-# META   "language_group": "synapse_pyspark"
-# META }
 
 # CELL ********************
 
@@ -610,14 +595,25 @@ print("Buckets returned:", len(onepass_before))
 
 # CELL ********************
 
+plan_string(onepass_before_df)
+
+# METADATA ********************
+
+# META {
+# META   "language": "python",
+# META   "language_group": "synapse_pyspark"
+# META }
+
+# CELL ********************
+
 # =================================================================================================
 # 4️⃣ DIAGNOSE — Prove the table is scanned once per category
 # =================================================================================================
 
 # Count the parquet scans in the physical plan; the union re-reads the table for every type.
 def count_table_scans(df):
-    plan = plan_string(df)
-    for token in ("FileScan parquet", "Scan parquet", "BatchScan"):
+    plan = plan_string(df).split("Initial Plan")[0]
+    for token in ("+- FileScan parquet", "+- Scan parquet", "+- BatchScan"):
         hits = plan.count(token)
         if hits:
             return hits
@@ -641,15 +637,7 @@ onepass_before_df.explain(mode="formatted")
 # MARKDOWN ********************
 
 # ### 🎯 Challenge
-#
 # Produce the same per-type totals with a single pass over `inventory_transaction`. Use one `groupBy("transaction_type")` aggregation so the plan contains a single scan, and confirm the totals match the looped version.
-
-# METADATA ********************
-
-# META {
-# META   "language": "python",
-# META   "language_group": "synapse_pyspark"
-# META }
 
 # CELL ********************
 
@@ -713,13 +701,6 @@ print(json.dumps({
 # MARKDOWN ********************
 
 # ✅ Verify that `fixedTableScans` is `1` while `baselineTableScans` equals the number of categories, and `sameResult` is `True`.
-
-# METADATA ********************
-
-# META {
-# META   "language": "python",
-# META   "language_group": "synapse_pyspark"
-# META }
 
 # CELL ********************
 
@@ -805,7 +786,6 @@ cartesian_before_evidence = {
     "qualityRows": TABLE_METRICS["quality_inspection"]["rows"],
     "productionOrderRows": TABLE_METRICS["production_order"]["rows"],
     "estimatedCartesianPairs": estimated_pairs,
-    "resultRows": len(cartesian_before_pdf),
     "expectedPlanSignal": "CartesianProduct or BroadcastNestedLoopJoin",
     "executedJoin": cartesian_before_join,
 }
@@ -1238,9 +1218,88 @@ print(f"{wc_before_analyzed[:3600]}...")
 
 # MARKDOWN ********************
 
+# ## Exercise 8 — Schema inference vs a declared schema
+# 
+# **Problem:** Reading the JSON landing zone with `spark.read.json(...)` lets Spark **infer** the schema. To do that it must open and scan the files *before your query runs* — an eager, hidden startup cost that grows with the number of files.
+# 
+# **Why it matters:** Inference triggers an extra pass over the data every time the pipeline starts. On thousands of small landing-zone files that scan can dominate a job that otherwise reads very little.
+# 
+# **Fix in one line:** Declare the schema with `StructType` and pass it to `.schema(...)`, so the read skips inference entirely.
+# 
+# > NOTE: This exercise reads the raw JSON landing zone at `Files/landing/manufacturing_event` produced by the `source_to_bronze` job in setup. If that path is absent, skip this exercise.
+
+
+# CELL ********************
+
+# ============================================================
+# 8️⃣ BENCHMARK — Time schema inference on the landing zone
+# ============================================================
+
+# The unoptimized pipeline left many small files in the landing zone.
+# NOTE: spark.read.json() triggers inference EAGERLY at construction time,
+# so timing the DataFrame construction itself captures the inference scan.
+LANDING_TABLE = "product_return"
+landing_path = f"Files/landing/{LANDING_TABLE}"
+
+print(f"🐌 Inferring schema from landing zone: {landing_path}\n")
+print("   Spark must open files and read metadata to discover columns + types...\n")
+
+with benchmark_op("Schema Inference", "inferred (file scan)", spark):
+    inferred_df = spark.read.option("multiline", "true").json(landing_path)
+
+inferred_df.printSchema()
+
+# METADATA ********************
+
+# META {
+# META   "language": "python",
+# META   "language_group": "synapse_pyspark"
+# META }
+
+# CELL ********************
+
+# ==================================================================================================
+# 1️⃣ FIX — Declare the schema so the read skips inference
+# ==================================================================================================
+from pyspark.sql.types import StructType, StructField, StringType, TimestampType, IntegerType, BooleanType, DecimalType
+
+# A production pipeline defines the schema once in code — no file scanning needed.
+static_schema = StructType([
+    StructField("EventId", StringType()),
+    StructField("Timestamp", TimestampType()),
+    StructField("MachineId", StringType()),
+    StructField("PartNum", StringType()),
+    StructField("ColorId", IntegerType()),
+    StructField("MoldTemp", DecimalType(5, 1)),
+    StructField("InjectionPressure", DecimalType(6, 1)),
+    StructField("CycleTimeMs", IntegerType()),
+    StructField("DefectDetected", BooleanType()),
+    StructField("DefectType", StringType()),
+    StructField("BatchId", StringType()),
+])
+
+with benchmark_op("Schema Inference", "static (no scan)", spark):
+    static_df = spark.read.schema(static_schema).json(landing_path)
+
+static_df.printSchema()
+
+# METADATA ********************
+
+# META {
+# META   "language": "python",
+# META   "language_group": "synapse_pyspark"
+# META }
+
+# MARKDOWN ********************
+
+# > 📝 **Key takeaway:** define schemas upfront for production pipelines.
+# > Inference is convenient for exploration but adds startup latency, especially when scanning thousands of small files.
+
+# MARKDOWN ********************
+
 # ---
 # 
-# ## Exercise 8 — Driver `collect()` / `toPandas()` and driver OOM
+# ## Exercise 9 — Driver `collect()` / `toPandas()` and driver OOM
 # 
 # **Problem:** The inventory workflow pulls every transaction to the driver with `collect()` and aggregates in Python. `.toPandas()` has the same raw-data movement risk.
 # 
@@ -1251,7 +1310,7 @@ print(f"{wc_before_analyzed[:3600]}...")
 # CELL ********************
 
 # ============================================================
-# 8️⃣ BENCHMARK — Capture baseline query time
+# 9️⃣ BENCHMARK — Capture baseline query time
 # ============================================================
 from collections import defaultdict
 
@@ -1294,7 +1353,7 @@ display(driver_result_rows)
 # CELL ********************
 
 # =================================================================================================
-# 8️⃣ DIAGNOSE — Prove the root cause is raw-row transfer to the driver
+# 9️⃣ DIAGNOSE — Prove the root cause is raw-row transfer to the driver
 # =================================================================================================
 
 # Record how many rows crossed to the driver and why that creates OOM risk.
@@ -1322,35 +1381,25 @@ print(json.dumps(driver_before_evidence, default=str, indent=2))
 
 # CELL ********************
 
-# Starter: build the signed quantity column with Spark expressions, then aggregate it.
-inv.explain(mode="formatted")
-
-starter_signed_inventory = inv.withColumn(
-    "signed_quantity",
-    F.when(
-        F.col("transaction_type").isin("CONSUMPTION", "ORDER_PICK", "SCRAP"),
-        -F.abs(F.col("quantity").cast("int")),
-    ).otherwise(F.col("quantity").cast("int")),
-)
-display(starter_signed_inventory.limit(5))
-
-# METADATA ********************
-
-# META {
-# META   "language": "python",
-# META   "language_group": "synapse_pyspark"
-# META }
-
-# CELL ********************
-
 # ==================================================================================================
-# 8️⃣ FIX — Aggregate on executors and collect only the small grouped result
+# 9️⃣ FIX — Aggregate on executors and collect only the small grouped result
 # ==================================================================================================
 
 # Spark computes net inventory by line before the driver receives the display result.
 print("✅ Running fixed query with distributed aggregation...\n")
 
 with benchmark_op("Driver Collect", "after", spark):
+    inv.write.format("noop").mode("overwrite").save()
+
+with benchmark_op("Driver Python Aggregation", "after", spark):
+    starter_signed_inventory = inv.withColumn(
+        "signed_quantity",
+        F.when(
+            F.col("transaction_type").isin("CONSUMPTION", "ORDER_PICK", "SCRAP"),
+            -F.abs(F.col("quantity").cast("int")),
+        ).otherwise(F.col("quantity").cast("int")),
+    )
+
     result_driver_after = (
         starter_signed_inventory
         .groupBy("line_id")
@@ -1369,7 +1418,7 @@ with benchmark_op("Driver Collect", "after", spark):
 # CELL ********************
 
 # ============================================================
-# 8️⃣ CHECK-CHANGES — Compare against baseline
+# 9️⃣ CHECK-CHANGES — Compare against baseline
 # ============================================================
 
 # Verify the fixed path collects only the final grouped rows.
@@ -1393,18 +1442,45 @@ result_driver_after.explain(mode="formatted")
 
 # ---
 # 
+# # 🏆 Performance Impact by Exercise
+# 
+# Execute the below to see the full impact across every exercise.
+# 
+
+
+# CELL ********************
+
+# ============================================================
+# SUMMARY — All benchmark results
+# ============================================================
+
+print_benchmark_summary()
+
+
+# METADATA ********************
+
+# META {
+# META   "language": "python",
+# META   "language_group": "synapse_pyspark"
+# META }
+
+# MARKDOWN ********************
+
+# ---
+# 
 # ## Summary — Optimizing code
 # 
-# You worked through eight code-level Spark anti-patterns, each with the same loop: benchmark the symptom, diagnose it in the physical plan, change one line, and re-check.
+# You worked through nine code-level Spark anti-patterns, each with the same loop: benchmark the symptom, diagnose it in the physical plan, change one line, and re-check.
 # 
 # 1. **Predicate pushdown** — filtered on a raw column so the scan prunes files instead of deriving a value first.
-# 2. **De-duplicate on the key, not the whole row** — passed the key subset to `dropDuplicates` instead of comparing every column.
-# 3. **Prune before a window** — projected the key columns before a `row_number()` window so the Exchange/Sort no longer carries the nested `order_lines` array.
-# 4. **One pass, not many** — replaced a per-category filter-and-union loop with a single `groupBy` so the table is scanned once instead of once per category.
-# 5. **Cartesian / missing join key** — restored the equi-join key so nested-loop work collapses to a hash join.
-# 6. **Python UDFs → native expressions** — replaced `BatchEvalPython` with native expressions (NEE makes the rewrite optional — see Module 3).
-# 7. **`withColumn` loop → `withColumns`** — collapsed ~50 chained `Project` nodes into one.
-# 8. **Driver `collect()` / OOM** — kept the aggregation distributed and returned only the small result to the driver.
+# 1. **De-duplicate on the key, not the whole row** — passed the key subset to `dropDuplicates` instead of comparing every column.
+# 1. **Prune before a window** — projected the key columns before a `row_number()` window so the Exchange/Sort no longer carries the nested `order_lines` array.
+# 1. **One pass, not many** — replaced a per-category filter-and-union loop with a single `groupBy` so the table is scanned once instead of once per category.
+# 1. **Cartesian / missing join key** — restored the equi-join key so nested-loop work collapses to a hash join.
+# 1. **Python UDFs → native expressions** — replaced `BatchEvalPython` with native expressions (NEE makes the rewrite optional — see Module 3).
+# 1. **`withColumn` loop → `withColumns`** — collapsed ~50 chained `Project` nodes into one.
+# 1. **Schema inference vs a declared schema** — declared a `StructType` so the read skips the eager file-scan inference pass.
+# 1. **Driver `collect()` / OOM** — kept the aggregation distributed and returned only the small result to the driver.
 # 
 # Carry the same workflow into the next modules: benchmark the symptom, inspect the Spark UI and physical plan, check Delta metadata, change the right lever, and validate the before/after result.
 

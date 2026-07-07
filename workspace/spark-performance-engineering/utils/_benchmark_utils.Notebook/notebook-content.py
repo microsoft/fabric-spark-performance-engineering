@@ -382,6 +382,35 @@ def _benchmark(self: DataFrame, scenario: str, state: str):
 
 DataFrame.benchmark = _benchmark
 
+def print_benchmark_summary():
+    for scenario, states in benchmarks.items():
+        if isinstance(states, dict):
+            baseline_key = next(iter(states))
+            baseline_ms = states[baseline_key]
+            best_ms = min(states.values())
+            W = 58
+            print(f"\n  \u250c{'\u2500' * W}\u2510")
+            title = f"\033[1m{scenario}\033[0m"
+            title_pad = W - 2 - len(scenario)
+            print(f"  \u2502  {title}{' ' * title_pad}\u2502")
+            print(f"  \u251c{'\u2500' * W}\u2524")
+            print(f"  \u2502  {'State':<28}{'Time (ms)':>12}{'Factor':>14}  \u2502")
+            print(f"  \u251c{'\u2500' * W}\u2524")
+            for s, ms in states.items():
+                ratio = baseline_ms / max(ms, 0.001)
+                if s == baseline_key:
+                    visible_tag = "baseline"
+                    tag = visible_tag
+                elif ms <= best_ms:
+                    visible_tag = f"{ratio:.1f}x faster"
+                    tag = f"\033[1;32m{visible_tag}\033[0m"
+                else:
+                    visible_tag = f"{ratio:.1f}x"
+                    tag = f"\033[1;34m{visible_tag}\033[0m"
+                pad = 14 - len(visible_tag)
+                print(f"  \u2502  {s:<28}{ms:>12.2f}{' ' * pad}{tag}  \u2502")
+            print(f"  \u2514{'\u2500' * W}\u2518")
+
 # METADATA ********************
 
 # META {
