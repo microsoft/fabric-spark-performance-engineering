@@ -68,6 +68,7 @@
 # Setup: reset the work schema, validate sources, and capture baseline metrics.
 from pyspark.sql import functions as F
 from pyspark.sql.window import Window
+from pyspark.testing import assertDataFrameEqual
 
 SOURCE_SCHEMA = "bronze"
 WORK_SCHEMA = "opt_code"
@@ -414,19 +415,9 @@ proj_after_df.explain(mode="formatted")
 # MARKDOWN ********************
 
 # ## Exercise 3 — Prune columns before a window / row_number
-#
 # **Problem:** A "latest order per customer" step runs `row_number()` over the wide `web_order` row. The window has to shuffle (Exchange) and sort every column — including the nested `order_lines` array — even though only a few fields are needed.
-#
 # **Why it matters:** A window with `partitionBy` / `orderBy` forces an Exchange + Sort. Whatever columns are on the DataFrame ride through that shuffle and sort, so carrying an unused nested array inflates the shuffle and sort spill for nothing.
-#
 # **Fix in one line:** Project just the columns the window needs before applying it, so the Exchange and Sort move a narrow row.
-
-# METADATA ********************
-
-# META {
-# META   "language": "python",
-# META   "language_group": "synapse_pyspark"
-# META }
 
 # CELL ********************
 
@@ -478,15 +469,7 @@ latest_before.explain(mode="formatted")
 # MARKDOWN ********************
 
 # ### 🎯 Challenge
-#
 # You only need `customer_id`, `order_date`, and `order_total` to pick the latest order. Project those columns before the `row_number()` window so the Exchange and Sort move a narrow row and `order_lines` never enters the shuffle. Confirm the latest-row result is unchanged.
-
-# METADATA ********************
-
-# META {
-# META   "language": "python",
-# META   "language_group": "synapse_pyspark"
-# META }
 
 # CELL ********************
 
@@ -559,13 +542,6 @@ print(json.dumps({
 
 # ✅ Verify that `fixedWindowShufflesOrderLines` is `False` and `fixedColumnsThroughWindow` is `4` (the three keys plus `rn`), while `sameLatestPerCustomer` is `True`.
 
-# METADATA ********************
-
-# META {
-# META   "language": "python",
-# META   "language_group": "synapse_pyspark"
-# META }
-
 # CELL ********************
 
 latest_after.explain(mode="formatted")
@@ -580,13 +556,6 @@ latest_after.explain(mode="formatted")
 # MARKDOWN ********************
 
 # ---
-
-# METADATA ********************
-
-# META {
-# META   "language": "python",
-# META   "language_group": "synapse_pyspark"
-# META }
 
 # MARKDOWN ********************
 
@@ -625,6 +594,17 @@ with benchmark_op("Reduce before join", "before", spark):
         .orderBy("status")
     )
     display(join_before_df)
+
+# METADATA ********************
+
+# META {
+# META   "language": "python",
+# META   "language_group": "synapse_pyspark"
+# META }
+
+# CELL ********************
+
+join_before_df.explain(mode="formatted")
 
 # METADATA ********************
 
@@ -732,8 +712,6 @@ with benchmark_op("Reduce before join", "after", spark):
 # ============================================================
 # 4️⃣ CHECK-CHANGES — Compare against baseline
 # ============================================================
-from pyspark.testing import assertDataFrameEqual
-
 try:
     assertDataFrameEqual(join_before_df, join_after_df)
     result = True
@@ -1429,3 +1407,4 @@ result_driver_after.explain(mode="formatted")
 # 8. **Driver `collect()` / OOM** — kept the aggregation distributed and returned only the small result to the driver.
 # 
 # Carry the same workflow into the next modules: benchmark the symptom, inspect the Spark UI and physical plan, check Delta metadata, change the right lever, and validate the before/after result.
+
