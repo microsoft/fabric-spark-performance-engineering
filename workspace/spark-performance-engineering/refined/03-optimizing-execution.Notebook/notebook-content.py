@@ -1,5 +1,28 @@
 # Fabric notebook source
 
+# METADATA ********************
+
+# META {
+# META   "kernel_info": {
+# META     "name": "synapse_pyspark"
+# META   },
+# META   "dependencies": {
+# META     "lakehouse": {
+# META       "default_lakehouse": "28f1e957-ea23-49e8-846b-be0d8a67412e",
+# META       "default_lakehouse_name": "toy_bricks",
+# META       "default_lakehouse_workspace_id": "7fc5eff4-7153-4da9-b909-54981a3ffcdb",
+# META       "known_lakehouses": [
+# META         {
+# META           "id": "28f1e957-ea23-49e8-846b-be0d8a67412e"
+# META         }
+# META       ]
+# META     },
+# META     "environment": {
+# META       "environmentId": "3cdd45c3-659b-bb60-4877-86d399fb9cb3",
+# META       "workspaceId": "00000000-0000-0000-0000-000000000000"
+# META     }
+# META   }
+# META }
 
 # MARKDOWN ********************
 
@@ -32,6 +55,7 @@
 # | 3. Shuffle partitions + executor spill | A KPI rollup is forced through one input partition and 4000 shuffle partitions. | Results stay identical; shuffle partitions are right-sized, AQE coalesces small outputs, and Spark UI spill/tiny-task signals are reduced or eliminated. |
 # | 4. Caching / materialization | Multiple dashboard branches repeatedly read and join the same inventory/order base. | Results stay identical; the shared joined base is materialized once and reused through cache hits instead of repeated source scans. |
 # | 5. Streaming optimizations | Hourly machine streaming aggregation is stateful without event-time cleanup. | Results stay identical for the batch proxy; streaming state is bounded by `EventTimeWatermark`, with trigger and checkpoint choices documented. |
+# | 6. Python UDFs / Native Execution Engine (NEE) | A correct top-customer query uses scalar Python UDFs, slow on the JVM. | Results stay identical; enabling NEE runs the same UDF code natively (no `BatchEvalPython`), removing the Python-boundary slowdown without any code change. |
 
 
 # CELL ********************
@@ -837,6 +861,186 @@ restore_conf("spark.sql.streaming.statefulOperator.checkCorrectness.enabled")
 
 # ---
 # 
+# ## Exercise 6 — Python UDFs and the Native Execution Engine (NEE)
+# 
+# ### Context and problem
+# 
+# A correct top-customer query uses scalar Python UDFs. On the JVM this forces a Python boundary (`BatchEvalPython`) and a large slowdown — the classic "Python UDFs are slow" regression. This is an **execution-lever** fix: the code is fine, so instead of rewriting it (Module 1's code lever), simply enable the Native Execution Engine (NEE) — the Fabric default — and the same UDF code runs natively. NEE is disabled here only to reproduce the regression, then re-enabled to show the boost.
+
+# METADATA ********************
+
+# META {
+# META   "language": "python",
+# META   "language_group": "synapse_pyspark"
+# META }
+
+# CELL ********************
+
+# ============================================================
+# 6️⃣ BENCHMARK — Same UDF code with NEE disabled (JVM execution)
+# ============================================================
+
+# Disable NEE to reproduce the historical Python-UDF regression on the JVM.
+from pyspark.sql.types import DoubleType
+
+remember_conf("spark.native.enabled")
+spark.conf.set("spark.native.enabled", "false")
+
+
+@F.udf(DoubleType())
+def python_line_total(quantity, unit_price, extended_price):
+    if extended_price is not None:
+        return float(extended_price)
+    if quantity is None or unit_price is None:
+        return 0.0
+    return float(quantity) * float(unit_price)
+
+
+@F.udf("string")
+def python_extract_day(timestamp_str):
+    if timestamp_str is None:
+        return None
+    match = re.search(r"(\d{4}-\d{2}-\d{2})", str(timestamp_str))
+    return match.group(1) if match else None
+
+
+exploded_orders6 = spark.table(table_ref("web_order")).selectExpr("web_order.*").select(
+    F.col("customer_id"),
+    F.col("order_date"),
+    F.explode("order_lines").alias("line"),
+)
+
+
+def top_customer_spend6():
+    return (
+        exploded_orders6
+        .withColumn("line_total", python_line_total("line.quantity", "line.unit_price", "line.extended_price"))
+        .withColumn("order_day", python_extract_day("order_date"))
+        .groupBy("customer_id")
+        .agg(F.sum("line_total").alias("total_spend"), F.max("order_day").alias("latest_day"), F.count("*").alias("line_count"))
+        .orderBy(F.desc("total_spend"))
+        .limit(10)
+    )
+
+
+with benchmark_op("Python UDF engine (NEE)", "before", spark):
+    q6_before_df = top_customer_spend6()
+    q6_before_pdf = q6_before_df.toPandas()
+
+display(q6_before_pdf)
+
+# METADATA ********************
+
+# META {
+# META   "language": "python",
+# META   "language_group": "synapse_pyspark"
+# META }
+
+# CELL ********************
+
+# =================================================================================================
+# 6️⃣ DIAGNOSE — Prove the Python boundary and NEE fallback under JVM execution
+# =================================================================================================
+
+# With NEE off, the plan shows BatchEvalPython / PythonUDF and NEE fallback blocks.
+q6_before_plan = plan_string(q6_before_df)
+q6_before_fallbacks = extract_nee_fallbacks(q6_before_plan)
+print(json.dumps({
+    "neeEnabled": spark.conf.get("spark.native.enabled"),
+    "hasBatchEvalPython": "BatchEvalPython" in q6_before_plan or "PythonUDF" in q6_before_plan,
+    "neeFallbackBlockCount": q6_before_fallbacks["blockCount"],
+    "neeFallbackOperators": q6_before_fallbacks["operators"],
+}, default=str, indent=2))
+print(q6_before_plan[:1200])
+
+# METADATA ********************
+
+# META {
+# META   "language": "python",
+# META   "language_group": "synapse_pyspark"
+# META }
+
+# MARKDOWN ********************
+
+# ### 🎯 Challenge
+# 
+# Enable the Native Execution Engine (`spark.native.enabled=true`, the Fabric default) and re-run the **same** UDF query — no code change. Confirm the query speeds up and the business result is unchanged.
+
+# METADATA ********************
+
+# META {
+# META   "language": "python",
+# META   "language_group": "synapse_pyspark"
+# META }
+
+# CELL ********************
+
+# Challenge starter: flip NEE on and re-run the identical query.
+print("NEE currently:", spark.conf.get("spark.native.enabled"))
+q6_attempt_df = top_customer_spend6()  # TODO: enable NEE before running
+print("Attempt has BatchEvalPython:", "BatchEvalPython" in plan_string(q6_attempt_df))
+
+# METADATA ********************
+
+# META {
+# META   "language": "python",
+# META   "language_group": "synapse_pyspark"
+# META }
+
+# CELL ********************
+
+# ==================================================================================================
+# 6️⃣ FIX — Enable NEE (the default); the same UDF code now runs natively
+# ==================================================================================================
+
+# No code change — just turn the engine on.
+spark.conf.set("spark.native.enabled", "true")
+
+with benchmark_op("Python UDF engine (NEE)", "after", spark):
+    q6_after_df = top_customer_spend6()
+    q6_after_pdf = q6_after_df.toPandas()
+
+display(q6_after_pdf)
+
+# METADATA ********************
+
+# META {
+# META   "language": "python",
+# META   "language_group": "synapse_pyspark"
+# META }
+
+# CELL ********************
+
+# ============================================================
+# 6️⃣ CHECK-CHANGES — Same code and result; the engine provides the speedup
+# ============================================================
+
+def _spend_map6(pdf):
+    return {row["customer_id"]: round(float(row["total_spend"] or 0), 4) for _, row in pdf.iterrows()}
+
+q6_after_plan = plan_string(q6_after_df)
+same_result = _spend_map6(q6_before_pdf) == _spend_map6(q6_after_pdf)
+valid = same_result
+record_result("6 python UDFs / NEE engine", "passed" if valid else "failed", {
+    "lesson": "Enabling NEE runs the same Python-UDF code natively — no rewrite required",
+    "sameBusinessResult": same_result,
+    "neeOffHadBatchEvalPython": "BatchEvalPython" in q6_before_plan or "PythonUDF" in q6_before_plan,
+    "neeOnHasBatchEvalPython": "BatchEvalPython" in q6_after_plan or "PythonUDF" in q6_after_plan,
+})
+assert valid, "Exercise 6 validation failed"
+restore_conf("spark.native.enabled")
+
+# METADATA ********************
+
+# META {
+# META   "language": "python",
+# META   "language_group": "synapse_pyspark"
+# META }
+
+# MARKDOWN ********************
+
+# ---
+# 
 # ## Summary — Optimizing how Spark runs
 # 
 # You tuned execution without changing source tables or business logic:
@@ -846,6 +1050,7 @@ restore_conf("spark.sql.streaming.statefulOperator.checkCorrectness.enabled")
 # 3. **Shuffle partitions + executor spill** — right-sized partitions and re-enabled AQE coalescing to avoid huge spilling tasks and tiny-task storms.
 # 4. **Caching / materialization** — cached the reused prepared branch after expensive joins/aggregation.
 # 5. **Streaming optimizations** — bounded state with watermarking and documented trigger/checkpoint choices.
+# 6. **Python UDFs / NEE** — enabled the Native Execution Engine so the same Python-UDF code runs natively, with no rewrite.
 
 
 # CELL ********************
@@ -858,7 +1063,7 @@ print(json.dumps(summary, indent=2, sort_keys=True, default=str))
 print("OPT_EXEC_FINAL_SUMMARY_END")
 for key in list(_ORIGINAL_CONF.keys()):
     restore_conf(key)
-assert len(results) == 5, f"Expected 5 exercise validations, got {len(results)}"
+assert len(results) == 6, f"Expected 6 exercise validations, got {len(results)}"
 assert not failed, f"Failed validations: {failed}"
 
 # METADATA ********************
