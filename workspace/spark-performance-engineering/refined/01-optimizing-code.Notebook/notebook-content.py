@@ -45,7 +45,7 @@
 # | 1 — Predicate pushdown | A daily defect-rate dashboard derives a string day before filtering `manufacturing_event`. | Fewer files read / filter pushed to FileScan; substring disappears from the filter path. |
 # | 2 — De-duplicate on the key, not the whole row | A "distinct orders" step calls `dropDuplicates()` with no subset, shuffling every column including the nested `order_lines` array. | FileScan ReadSchema shrinks; only the key columns are shuffled. |
 # | 3 — Prune before a window / row_number | A "latest order per customer" runs `row_number()` over the wide `web_order` row, shuffling and sorting every column — including the nested `order_lines` array — through the window. | Only the key columns cross the window Exchange/Sort; `order_lines` is pruned; identical latest-row result. |
-# | 4 — Reduce before you join | A status roll-up joins every raw `manufacturing_event` row to `production_order`, then aggregates. | Events pre-aggregated to the join grain; far fewer rows shuffle into the join. |
+# | 4 — One pass, not many | A per-type report loops over each `transaction_type`, filtering and aggregating `inventory_transaction` once per type and unioning the results. | A single `groupBy` scans the table once; N scans collapse to 1; identical per-type totals. |
 # | 5 — Cartesian / missing join key | A pass-rate query omits the production-order join key, and a cycle-time variant uses an inequality self-join. | `CartesianProduct` / nested-loop work replaced by equi-join or window logic; runtime and pair counts drop. |
 # | 6 — Python UDFs → native expressions | A top-customer query computes line totals/order days with Python UDFs (NEE disabled to expose the JVM boundary). | `BatchEvalPython` removed after rewriting UDFs as native expressions; NEE makes the rewrite optional (see Module 3). |
 # | 7 — `withColumn` loop → `withColumns` | Feature engineering adds ~50 derived columns by chaining `.withColumn()`, one per column. | Analyzed plan collapses from ~50 nested `Project` nodes to 1; identical columns and rows. |
@@ -559,52 +559,47 @@ latest_after.explain(mode="formatted")
 
 # MARKDOWN ********************
 
-# ---
-# 
-# ## Exercise 4 — Reduce before you join
-# 
-# **Problem:** A status roll-up joins *every raw* `manufacturing_event` row to `production_order`, then aggregates by `status`.
-# 
-# **Why it matters:** Millions of fact rows are shuffled into the join only to be collapsed afterward. Without table statistics, Spark keeps the written join order, so the big side is never reduced first.
-# 
-# **Fix in one line:** Pre-aggregate the fact to the join grain (`production_order_id`) *before* joining, then roll up.
+# ## Exercise 4 — One pass, not many (avoid repeated scans)
+#
+# **Problem:** A per-transaction-type report is built by looping over each `transaction_type`, filtering and aggregating `inventory_transaction` once per type, then unioning the results — so the table is scanned once per category.
+#
+# **Why it matters:** Spark is excellent at joins and aggregations, but it will *not* merge independent filtered passes into a single read. Each pass re-scans the table, so the work grows with the number of categories instead of staying a single scan.
+#
+# **Fix in one line:** Compute every bucket in one `groupBy(transaction_type)` (or conditional aggregation) so the table is scanned once.
+
+# METADATA ********************
+
+# META {
+# META   "language": "python",
+# META   "language_group": "synapse_pyspark"
+# META }
 
 # CELL ********************
 
 # ============================================================
 # 4️⃣ BENCHMARK — Capture baseline query time
 # ============================================================
+from functools import reduce
 
-# Baseline: join all raw event rows, then aggregate by status.
-events3 = spark.table(table_ref("manufacturing_event")).select(
-    F.col("manufacturing_event.production_order_id").alias("production_order_id"),
-    F.col("manufacturing_event.cycle_time_ms").alias("cycle_time_ms"),
-    F.col("manufacturing_event.defect_detected").cast("int").alias("is_defect"),
+inv4 = spark.table(table_ref("inventory_transaction")).select(
+    F.col("transaction_type"),
+    F.col("quantity").cast("int").alias("quantity"),
 )
-orders3 = spark.table(table_ref("production_order")).select(
-    F.col("production_order.production_order_id").alias("production_order_id"),
-    F.col("production_order.status").alias("status"),
-)
+txn_types = [r["transaction_type"] for r in inv4.select("transaction_type").distinct().orderBy("transaction_type").collect()]
+print("Transaction types:", txn_types)
 
-with benchmark_op("Reduce before join", "before", spark):
-    join_before_df = (
-        events3.join(orders3, "production_order_id")
-        .groupBy("status")
-        .agg(F.count("*").alias("events"), F.sum("cycle_time_ms").alias("total_cycle_ms"), F.sum("is_defect").alias("defects"))
-        .orderBy("status")
-    )
-    display(join_before_df)
+# Baseline: one filtered aggregation per type, unioned — the table is re-scanned for each type.
+parts = [
+    inv4.filter(F.col("transaction_type") == t)
+        .groupBy("transaction_type")
+        .agg(F.count("*").alias("txns"), F.sum("quantity").alias("total_qty"))
+    for t in txn_types
+]
+onepass_before_df = reduce(lambda a, b: a.unionByName(b), parts)
 
-# METADATA ********************
-
-# META {
-# META   "language": "python",
-# META   "language_group": "synapse_pyspark"
-# META }
-
-# CELL ********************
-
-join_before_df.explain(mode="formatted")
+with benchmark_op("One pass, not many", "before", spark):
+    onepass_before = {r["transaction_type"]: (r["txns"], int(r["total_qty"] or 0)) for r in onepass_before_df.collect()}
+print("Buckets returned:", len(onepass_before))
 
 # METADATA ********************
 
@@ -616,15 +611,25 @@ join_before_df.explain(mode="formatted")
 # CELL ********************
 
 # =================================================================================================
-# 4️⃣ DIAGNOSE — Prove every raw fact row is shuffled into the join
+# 4️⃣ DIAGNOSE — Prove the table is scanned once per category
 # =================================================================================================
 
-# Compare the raw event count against the far smaller join-key grain.
+# Count the parquet scans in the physical plan; the union re-reads the table for every type.
+def count_table_scans(df):
+    plan = plan_string(df)
+    for token in ("FileScan parquet", "Scan parquet", "BatchScan"):
+        hits = plan.count(token)
+        if hits:
+            return hits
+    return plan.count("Scan ")
+
+before_scans = count_table_scans(onepass_before_df)
 print(json.dumps({
-    "antiPattern": "join all raw event rows, then aggregate",
-    "eventRowsIntoBaselineJoin": TABLE_METRICS["manufacturing_event"]["rows"],
-    "joinKeyGrainRows": events3.select("production_order_id").distinct().count()
+    "antiPattern": "filter + aggregate once per category, then union",
+    "categories": len(txn_types),
+    "tableScansInPlan": before_scans,
 }, default=str, indent=2))
+onepass_before_df.explain(mode="formatted")
 
 # METADATA ********************
 
@@ -636,18 +641,8 @@ print(json.dumps({
 # MARKDOWN ********************
 
 # ### 🎯 Challenge
-# 
-# Pre-aggregate `events3` down to the `production_order_id` grain (sum `cycle_time_ms`, sum `is_defect`, count events) **before** joining `production_order`, then roll the partial sums up by `status`. The business result must match, with far fewer rows shuffled into the join.
-
-# CELL ********************
-
-# Starter: reduce events to the join grain first, then join.
-join_starter_df = (
-    events3.join(orders3, "production_order_id")
-        .groupBy("status")
-        .agg(F.count("*").alias("events"), F.sum("cycle_time_ms").alias("total_cycle_ms"), F.sum("is_defect").alias("defects"))
-)  # TODO: aggregate events before the join to reduce the join count
-display(join_starter_df)
+#
+# Produce the same per-type totals with a single pass over `inventory_transaction`. Use one `groupBy("transaction_type")` aggregation so the plan contains a single scan, and confirm the totals match the looped version.
 
 # METADATA ********************
 
@@ -656,49 +651,34 @@ display(join_starter_df)
 # META   "language_group": "synapse_pyspark"
 # META }
 
-# MARKDOWN ********************
+# CELL ********************
 
-# <details>
-#   <summary><strong>🔑 Solution:</strong> Click to reveal</summary>
-# 
-# <br/>
-# 
-# ```python
-# events3_reduced = (
-#     events3.groupBy("production_order_id")
-#     .agg(F.count("*").alias("events"), F.sum("cycle_time_ms").alias("total_cycle_ms"), F.sum("is_defect").alias("defects"))
-# )
-# join_starter_df = (
-#     events3_reduced.join(orders3, "production_order_id")
-#         .groupBy("status")
-#         .agg(F.count("*").alias("events"), F.sum("cycle_time_ms").alias("total_cycle_ms"), F.sum("is_defect").alias("defects"))
-# )
-# display(join_starter_df)
-# ```
-# 
-# </details>
-# 
-# ---
+# Starter: compute every bucket in one pass instead of one query per type.
+onepass_starter_df = inv4  # TODO: groupBy("transaction_type").agg(count, sum(quantity))
+print("Scans in starter plan:", count_table_scans(onepass_starter_df))
+
+# METADATA ********************
+
+# META {
+# META   "language": "python",
+# META   "language_group": "synapse_pyspark"
+# META }
 
 # CELL ********************
 
 # ==================================================================================================
-# 4️⃣ FIX — Pre-aggregate to the join grain, then join the small result
+# 4️⃣ FIX — Aggregate every bucket in a single pass
 # ==================================================================================================
 
-# Reducing the fact before the join shrinks the shuffle feeding it.
-with benchmark_op("Reduce before join", "after", spark):
-    events3_reduced = (
-        events3.groupBy("production_order_id")
-        .agg(F.count("*").alias("events"), F.sum("cycle_time_ms").alias("total_cycle_ms"), F.sum("is_defect").alias("defects"))
-    )
-    join_after_df = (
-        events3_reduced.join(orders3, "production_order_id")
-        .groupBy("status")
-        .agg(F.sum("events").alias("events"), F.sum("total_cycle_ms").alias("total_cycle_ms"), F.sum("defects").alias("defects"))
-        .orderBy("status")
-    )
-    display(join_after_df)
+# One groupBy scans the table once and produces all category totals together.
+onepass_after_df = (
+    inv4.groupBy("transaction_type")
+    .agg(F.count("*").alias("txns"), F.sum("quantity").alias("total_qty"))
+)
+
+with benchmark_op("One pass, not many", "after", spark):
+    onepass_after = {r["transaction_type"]: (r["txns"], int(r["total_qty"] or 0)) for r in onepass_after_df.collect()}
+print("Buckets returned:", len(onepass_after))
 
 # METADATA ********************
 
@@ -712,18 +692,38 @@ with benchmark_op("Reduce before join", "after", spark):
 # ============================================================
 # 4️⃣ CHECK-CHANGES — Compare against baseline
 # ============================================================
-try:
-    assertDataFrameEqual(join_before_df, join_after_df)
-    result = True
-except:
-    result = False
 
+# One scan instead of N, with identical per-type totals.
+after_scans = count_table_scans(onepass_after_df)
 print(json.dumps({
-    "antiPattern": "join raw rows then aggregate",
-    "sameBusinessResult": result,
-    "eventRowsIntoBaselineJoin": TABLE_METRICS["manufacturing_event"]["rows"],
-    "rowsIntoFixedJoin": events3.select("production_order_id").distinct().count(),
+    "antiPattern": "repeated filter+aggregate passes unioned",
+    "categories": len(txn_types),
+    "baselineTableScans": before_scans,
+    "fixedTableScans": after_scans,
+    "sameResult": onepass_before == onepass_after,
 }, default=str, indent=2))
+
+# METADATA ********************
+
+# META {
+# META   "language": "python",
+# META   "language_group": "synapse_pyspark"
+# META }
+
+# MARKDOWN ********************
+
+# ✅ Verify that `fixedTableScans` is `1` while `baselineTableScans` equals the number of categories, and `sameResult` is `True`.
+
+# METADATA ********************
+
+# META {
+# META   "language": "python",
+# META   "language_group": "synapse_pyspark"
+# META }
+
+# CELL ********************
+
+onepass_after_df.explain(mode="formatted")
 
 # METADATA ********************
 
@@ -1400,7 +1400,7 @@ result_driver_after.explain(mode="formatted")
 # 1. **Predicate pushdown** — filtered on a raw column so the scan prunes files instead of deriving a value first.
 # 2. **De-duplicate on the key, not the whole row** — passed the key subset to `dropDuplicates` instead of comparing every column.
 # 3. **Prune before a window** — projected the key columns before a `row_number()` window so the Exchange/Sort no longer carries the nested `order_lines` array.
-# 4. **Reduce before you join** — pre-aggregated to the join grain so far fewer rows shuffle into the join.
+# 4. **One pass, not many** — replaced a per-category filter-and-union loop with a single `groupBy` so the table is scanned once instead of once per category.
 # 5. **Cartesian / missing join key** — restored the equi-join key so nested-loop work collapses to a hash join.
 # 6. **Python UDFs → native expressions** — replaced `BatchEvalPython` with native expressions (NEE makes the rewrite optional — see Module 3).
 # 7. **`withColumn` loop → `withColumns`** — collapsed ~50 chained `Project` nodes into one.
