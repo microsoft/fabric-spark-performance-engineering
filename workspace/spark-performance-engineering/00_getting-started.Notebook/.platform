@@ -2,7 +2,8 @@
   "$schema": "https://developer.microsoft.com/json-schemas/fabric/gitIntegration/platformProperties/2.0.0/schema.json",
   "metadata": {
     "type": "Notebook",
-    "displayName": "00_getting-started"
+    "displayName": "00_getting-started",
+    "description": "Set up the workshop: verify prerequisites, seed the bronze Delta tables with the source_to_bronze job, and get oriented to the Toy Brick data model and the three modules."
   },
   "config": {
     "version": "2.0",

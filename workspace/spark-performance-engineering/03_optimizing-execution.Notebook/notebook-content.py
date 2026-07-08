@@ -273,6 +273,18 @@ assert valid, "Exercise 1 validation failed"
 
 # MARKDOWN ********************
 
+# ### 💡 What Just Happened?
+# 
+# With automatic broadcast disabled, Spark defaulted to a `SortMergeJoin`: **both** sides are shuffled and sorted on the join key before matching — expensive, and wasteful when one side is tiny. The physical plan confirmed the sort-merge and the extra shuffle stages.
+# 
+# Wrapping the small reference tables in `broadcast(...)` (or restoring automatic broadcast + AQE) ships those dimensions to every executor so the large fact is joined **in place** — a `BroadcastHashJoin` with no shuffle or sort of the big side. Only the join *strategy* changed; the aggregation and the result are identical.
+# 
+# > 📝 **Note:** Broadcast is only safe when the reference truly fits in executor memory. Fabric's automatic broadcast (governed by `spark.sql.autoBroadcastJoinThreshold`, and AQE's runtime size estimates) usually picks this for you — this exercise disabled it to make the lever visible.
+# 
+# ---
+
+# MARKDOWN ********************
+
 # ---
 # 
 # ## Exercise 2 — Skew handling / AQE skew join
@@ -467,6 +479,18 @@ restore_conf("spark.sql.adaptive.advisoryPartitionSizeInBytes")
 
 # MARKDOWN ********************
 
+# ### 💡 What Just Happened?
+# 
+# One machine dominated the join key, so hashing the key into 200 shuffle partitions dropped all of the hot machine's rows into a **single** partition. That partition's task became a straggler — the whole stage waited on one core while the rest sat idle. The Spark UI Stages view made this obvious: one task's duration dwarfed the others.
+# 
+# With `spark.sql.adaptive.skewJoin.enabled` on (and the byte thresholds lowered so it fires on this small, highly-compressible lab data), **AQE detects the oversized partition at runtime and splits it** into several sub-partitions that run in parallel, rebalancing task times. The query text and the result are unchanged.
+# 
+# > 📝 **Note:** When AQE won't trigger (e.g. the skew is below threshold or the join isn't eligible), **manual salting** is the fallback: add `pmod(xxhash64(key), N)` to the fact and explode the dimension across the same N salts to spread the hot key.
+# 
+# ---
+
+# MARKDOWN ********************
+
 # ---
 # 
 # ## Exercise 3 — Shuffle partition sizing (tiny-task storm)
@@ -606,6 +630,18 @@ restore_conf("spark.sql.adaptive.coalescePartitions.enabled")
 # META   "language": "python",
 # META   "language_group": "synapse_pyspark"
 # META }
+
+# MARKDOWN ********************
+
+# ### 💡 What Just Happened?
+# 
+# A large static `spark.sql.shuffle.partitions` (1000) with AQE coalescing off forced the small aggregation into **thousands of near-empty shuffle partitions**. Each partition still launches a task, so most of the wall-clock was task-scheduling overhead, not compute — a "tiny-task storm." The Stages view showed thousands of tasks processing 0 rows.
+# 
+# Re-enabling `spark.sql.adaptive.coalescePartitions.enabled` lets **AQE coalesce** those tiny partitions into right-sized tasks *at runtime*, based on the actual shuffle output rather than a guessed static count. The KPI query and result are identical; only the task count changed.
+# 
+# > 📝 **Note:** There is no magic fixed number for `shuffle.partitions`. Let AQE size partitions dynamically instead of hard-coding a value "to be safe" — the right count depends on the data volume of each specific shuffle.
+# 
+# ---
 
 # MARKDOWN ********************
 
@@ -782,6 +818,18 @@ assert valid, "Exercise 4 validation failed"
 
 # MARKDOWN ********************
 
+# ### 💡 What Just Happened?
+# 
+# Spark DataFrames are **lazy**: each of the three dashboards triggered its own action, so the shared scan-join-shuffle base was recomputed from scratch every time. The plans showed the same `FileScan` + join + shuffle repeated once per dashboard — the expensive shuffle ran three times.
+# 
+# `persist(MEMORY_AND_DISK)` followed by a `count()` **materializes** the aggregated base once. The three roll-ups then read from the in-memory cache (`InMemoryTableScan` in their plans) and only do cheap additive sums, so the costly shuffle runs a single time. Results are identical across all three dashboards.
+# 
+# > 📝 **Note:** Caching pays off only when a result is **reused** and is **small enough** to fit — and you should `unpersist()` when done (as this exercise does) to free the memory. Caching a single-use DataFrame just adds overhead.
+# 
+# ---
+
+# MARKDOWN ********************
+
 # ---
 # 
 # ## Exercise 5 — Python UDFs and the Native Execution Engine (NEE)
@@ -945,6 +993,18 @@ restore_conf("spark.native.enabled")
 # META   "language": "python",
 # META   "language_group": "synapse_pyspark"
 # META }
+
+# MARKDOWN ********************
+
+# ### 💡 What Just Happened?
+# 
+# The UDF code was perfectly correct — the slowdown came from **where it ran**. With `spark.native.enabled=false`, the scalar Python UDFs executed on the JVM behind a `BatchEvalPython` boundary (per-row serialization to a Python worker), reproducing the classic "Python UDFs are slow" regression.
+# 
+# Enabling the **Native Execution Engine** (`spark.native.enabled=true`, the Fabric default) runs the *same* UDF code natively/vectorized — no `BatchEvalPython`, no code change — and the business result is unchanged. This is the **execution lever**: flip the engine on rather than rewriting the logic.
+# 
+# > 📝 **Note:** Contrast this with Module 1's Exercise 6, where the *code* lever rewrote the same UDFs as native expressions. Both fix the Python-boundary cost; here you change execution config, there you change code. On Fabric, NEE usually makes the rewrite optional.
+# 
+# ---
 
 # MARKDOWN ********************
 
