@@ -26,21 +26,18 @@
 
 # MARKDOWN ********************
 
-# # **Module 2: Delta Table Design & Optimization**
+# # **Module 2 — Optimizing Tables**
 # 
-# Learn how to identify common Delta table performance problems, apply the right optimization, and validate the impact with before-and-after benchmarks.
+# Learn how to identify common Delta Lake table performance problems, apply the right optimizations, and validate the impact with before-and-after benchmarks.
 # 
-# **Duration:** 45 minutes | **Level:** 300–400
 # 
-# ---
+# ### **Scenario**
 # 
-# ### Scenario
-# 
-# The LEGO manufacturing analytics team ran their initial data pipeline with **every Spark and Delta optimization disabled** — no auto-compaction, no optimize-write, no adaptive query execution, no V-Order, no deletion vectors. The result? Thousands of tiny files, full table scans on every query, and painfully slow DML operations.
+# The Toy Bricks data engineering team ran their initial data pipeline with **common Spark and Delta optimizations disabled** — no auto-compaction, no optimize-write, no clustering. The result? Thousands of tiny files, full table scans on every query, and painfully slow DML operations.
 # 
 # **Your mission:** Fix each table live, one optimization at a time, and measure the impact.
 # 
-# ### Lab Pattern
+# ### **Lab Pattern**
 # 
 # Every exercise follows the same steps:
 # 
@@ -51,7 +48,7 @@
 # | 🔧 **Fix** | Apply the optimization |
 # | 🚀 **Re-benchmark** | Run the same test and compare against the baseline |
 # 
-# ### Exercises
+# ### **Exercises**
 # 
 # | # | Optimization | Table | What's broken |
 # |---|-------------|-------|----------------|
@@ -66,8 +63,6 @@
 
 # MARKDOWN ********************
 
-# ---
-# 
 # ## OPTIONAL - Run `source_to_bronze_optimized`
 # 
 # The Spark Job Definition `source_to_bronze` that was trigged in `00-getting-started` intentionally disables best practice configurations to highlight the impact of suboptimal table layout and compaction strategies. Run the `source_to_bronze_optimized` Spark Job Definition to see the impact on table layout health after the completion of the exercises in this notebook.
@@ -156,7 +151,7 @@ print(f"   Original tables in '{ORIG_SCHEMA}' are preserved for re-runs.")
 
 # ---
 # 
-# # Exercise 1: Fix the Small Files Problem
+# ## **Exercise 1 — Fix the Small Files Problem**
 # 
 # **Table:** `inventory_transaction` — high-frequency order lines from the web.
 # 
@@ -222,7 +217,7 @@ display(spark.sql(f"DESCRIBE DETAIL {FAST_SCHEMA}.web_order_line").select("forma
 
 # MARKDOWN ********************
 
-# ### 🎯 Challenge: Check the table file count and average file size
+# ### 🎯 **Challenge: Check the table file count and average file size**
 # 
 # You've seen the problem before, thousands of tiny files that makes performance regress. Can you confirm it?
 # 
@@ -312,7 +307,7 @@ metrics_1_after = show_metrics(f"{FAST_SCHEMA}.web_order_line", "after")
 
 # MARKDOWN ********************
 
-# ### 💡 What Just Happened?
+# ### 💡 *What Just Happened?*
 # 
 # `OPTIMIZE` rewrote all those tiny files into a smaller number of properly-sized files (~128 MB each). This is a **one-time reactive compaction** — it doesn't prevent small files from appearing again on the next write.
 # 
@@ -322,9 +317,7 @@ metrics_1_after = show_metrics(f"{FAST_SCHEMA}.web_order_line", "after")
 
 # MARKDOWN ********************
 
-# ---
-# 
-# # Exercise 2: Optimize Write
+# ## **Exercise 2 — Optimize Write**
 # 
 # **Table:** `inventory_transaction` — part movements across production lines
 # 
@@ -339,8 +332,7 @@ metrics_1_after = show_metrics(f"{FAST_SCHEMA}.web_order_line", "after")
 # 1. Analyze the Delta log to see the file-per-commit pattern from the original pipeline
 # 2. Replicate the problem with a test write
 # 3. Enable optimize write and repeat — see the difference
-# 
-# ---
+
 
 # CELL ********************
 
@@ -409,7 +401,7 @@ commit_stats_agg = (
 
 # MARKDOWN ********************
 
-# ### 🎯 Visualize file growth over time
+# ### 🎯 **Challenge: Visualize file growth over time**
 # Chart the cumulative files added over time vs. the cumulative files added if Optimize Write were enabled to bin-pack small partitions of data before writing.
 # 1. Select **New chart**
 # 1. Create a **Line Chart**
@@ -466,7 +458,7 @@ print(f"   ⚠️  New files created: {new_files_without_ow}")
 
 # MARKDOWN ********************
 
-# ### 🎯 Challenge: Mitigate Future Small Files
+# ### 🎯 **Challenge: Mitigate Future Small Files**
 # 
 # You've fixed the existing small files with OPTIMIZE. But new writes will create small files again unless you change the table's write behavior.
 # 
@@ -560,7 +552,7 @@ benchmarks["Exercise 2: Optimize Write"] = {
 
 # MARKDOWN ********************
 
-# ### 💡 What Just Happened?
+# ### 💡 *What Just Happened?*
 # 
 # Without optimize write, Spark wrote one file per output partition — even though the data was tiny. With optimize write enabled, Spark **bin-packs** the data at write time, coalescing small partitions into properly-sized files.
 # 
@@ -575,9 +567,7 @@ benchmarks["Exercise 2: Optimize Write"] = {
 
 # MARKDOWN ********************
 
-# ---
-# 
-# # Exercise 3: Liquid Clustering
+# ## **Exercise 3 — Liquid Clustering**
 # 
 # **Table:** `manufacturing_event`
 # 
@@ -589,8 +579,6 @@ benchmarks["Exercise 2: Optimize Write"] = {
 # - Gets worse as the table grows
 # 
 # **Fix:** [Liquid clustering](https://learn.microsoft.com/en-us/fabric/data-engineering/liquid-clustering?tabs=sparksql) — co-locates related rows in the same files so Delta can skip irrelevant files entirely.
-# 
-# ---
 
 # CELL ********************
 
@@ -649,7 +637,7 @@ metrics_3_after = show_metrics(f"{FAST_SCHEMA}.manufacturing_event", "after clus
 
 # MARKDOWN ********************
 
-# ### 🎯 Challenge: Check Liquid Clustering Quality Metrics
+# ### 🎯 **Challenge: Check Liquid Clustering Quality Metrics**
 # 
 # `OPTIMIZE` metrics in Fabric Spark Runtime 2.0 contains a `clusteringQuality` struct. Query the struct to see the clustering quality.
 # 
@@ -723,7 +711,7 @@ print("   with healthy clustering (see skippingEffectiveness in the prior cell),
 
 # MARKDOWN ********************
 
-# ### 💡 What Just Happened?
+# ### 💡 *What Just Happened?*
 # 
 # Liquid clustering **physically re-organizes data** so rows with similar `PartNum` and `TransactionType` values end up in the same files. Delta's min/max file statistics can then immediately skip files that don't contain matching values.
 # 
@@ -738,11 +726,9 @@ print("   with healthy clustering (see skippingEffectiveness in the prior cell),
 
 # MARKDOWN ********************
 
-# ---
+# ## **Exercise 4 — Deletion Vectors**
 # 
-# # Exercise 4: Deletion Vectors
-# 
-# **Table:** `web_order_line` — order line items for LEGO set purchases
+# **Table:** `web_order_line` — order line items for set purchases
 # 
 # **Columns:** `OrderId`, `LineNumber`, `SetNum`, `PartNum`, `ItemName`, `Quantity`, `UnitPrice`, `ExtendedPrice`
 # 
@@ -754,8 +740,7 @@ print("   with healthy clustering (see skippingEffectiveness in the prior cell),
 # - `MERGE` operations (common in ETL) suffer the same penalty
 # 
 # **Fix:** [Deletion vectors](https://learn.microsoft.com/fabric/data-engineering/delta-optimization-and-v-order?tabs=sparksql#deletion-vectors) — instead of rewriting files, Delta writes a small sidecar file that marks which rows are logically deleted. The original data files stay untouched.
-# 
-# ---
+
 
 # CELL ********************
 
@@ -898,7 +883,7 @@ print(f"   The original data files were NOT rewritten — massive write amplific
 
 # ---
 # 
-# # Exercise 5: Data Skipping Stats on Wide Tables
+# ## **Exercise 5 — Data Skipping Stats on Wide Tables**
 # 
 # **Table:** `production_analysis` — a denormalized join of manufacturing events, production lines, molds, colors, parts, and part categories.
 # 
@@ -915,17 +900,15 @@ print(f"   The original data files were NOT rewritten — massive write amplific
 # 2. Try to enable clustering → hit the `DELTA_CLUSTERING_COLUMN_MISSING_STATS` error
 # 3. Unblock: extend stats coverage, rewrite files, then cluster
 # 4. Measure the improvement
-# 
-# ---
 
 
 # CELL ********************
 
 # ============================================================
-# 5⃣ SETUP — Create a wide denormalized table
+# 5️⃣ SETUP — Create a wide denormalized table
 # ============================================================
 
-# Join LEGO manufacturing tables into a single wide table (35+ columns).
+# Join manufacturing tables into a single wide table (35+ columns).
 # manufacturing_event is the high-frequency IoT fact table — the biggest in the lakehouse.
 # The target filter column (part_num) will land PAST position 32.
 
@@ -1027,7 +1010,7 @@ for i, col in enumerate(wide_df.columns, 1):
 
 # CELL ********************
 
-# 🧱 Let's explore the wide table — look at the LEGO manufacturing data!
+# 🧱 Let's explore the wide table — look at the manufacturing data!
 print("🏭 Sample rows from the wide denormalized table\n")
 display(spark.sql(f"""
     SELECT part_num, part_name, plant, color_name,
@@ -1059,7 +1042,7 @@ display(spark.sql(f"""
 # CELL ********************
 
 # ============================================================
-# 5⃣ BENCHMARK — Query filtering on a column past position 32
+# 5️⃣ BENCHMARK — Query filtering on a column past position 32
 # ============================================================
 
 # Pick a frequently produced part to filter on
@@ -1106,7 +1089,7 @@ with benchmark_op("Data Skipping Stats", "before (no stats past col 32)", spark)
 # CELL ********************
 
 # ============================================================
-# 5⃣ DIAGNOSE — Try to enable clustering on theme_name
+# 5️⃣ DIAGNOSE — Try to enable clustering on theme_name
 # ============================================================
 
 # You might think: "just cluster on theme_name to co-locate the data!"
@@ -1156,7 +1139,7 @@ print(f"   part_num position: {wide_df.columns.index('part_num') + 1} \u2190 not
 
 # MARKDOWN ********************
 
-# ### 🎯 Challenge: Unblock Clustering on `part_num`
+# ### 🎯 **Challenge: Unblock Clustering on `part_num`**
 # 
 # You saw the `DELTA_CLUSTERING_COLUMN_MISSING_STATS` error. Stats are only collected for the first 32 columns, and `part_num` is at position 33.
 # 
@@ -1225,7 +1208,7 @@ WIDE_TABLE = "production_analysis"
 # CELL ********************
 
 # ============================================================
-# 5⃣ RE-BENCHMARK — Same query, now with stats + clustering
+# 5️⃣ RE-BENCHMARK — Same query, now with stats + clustering
 # ============================================================
 
 WIDE_TABLE = "production_analysis"
@@ -1263,7 +1246,7 @@ with benchmark_op("Data Skipping Stats", "after (stats + clustering)", spark):
 
 # MARKDOWN ********************
 
-# ### 💡 What Just Happened?
+# ### 💡 *What Just Happened?*
 # 
 # Delta Lake collects **min/max statistics** per column per file. These stats power **data skipping** — the ability to prune entire files from a scan when the filter value falls outside a file’s min/max range.
 # 
@@ -1292,19 +1275,13 @@ with benchmark_op("Data Skipping Stats", "after (stats + clustering)", spark):
 
 # MARKDOWN ********************
 
-# ---
-# 
-# # 🏆 Performance Impact by Exercise
+# # 🏆 **Performance Impact by Exercise**
 # 
 # Execute the below to see the full impact across every exercise.
 # 
 
 
 # CELL ********************
-
-# ============================================================
-# SUMMARY — All benchmark results
-# ============================================================
 
 print_benchmark_summary()
 
@@ -1317,7 +1294,7 @@ print_benchmark_summary()
 
 # MARKDOWN ********************
 
-# ### KEY TAKEAWAYS
+# ### **KEY TAKEAWAYS**
 # 
 # 1. OPTIMIZE compacts small files — but it's REACTIVE (run after the damage)
 # 2. Optimize Write bin-packs at write time — PROACTIVE, prevents small files at source
@@ -1329,19 +1306,18 @@ print_benchmark_summary()
 
 # ---
 # 
-# ### 📝 What the Optimized Pipeline Configures Automatically
+# ### 📝 *What the Optimized Pipeline Configures Automatically*
 # 
-# The `seed_lego_delta_tables` Spark Job Definition uses ArcFlow's `SparkConfigurator` to set these best-practice configs at session startup:
+# Based on this workload performing frequent small writes, the `source_to_bronze` Spark Job Definition uses ArcFlow's `SparkConfigurator` to set these best-practice configs at session startup:
 # 
 # | Setting | Value | What it does |
 # |---------|-------|-------------|
-# | `autoCompact.enabled` | `true` | Compacts small files after writes |
-# | `optimizeWrite.enabled` | `true` | Bin-packs data during writes |
-# | `targetFileSize.adaptive.enabled` | `true` | Adapts target file size to workload |
-# | `enableDeletionVectors` | `true` | Marks deleted rows instead of rewriting files |
-# | `optimize.fast.enabled` | `true` | Faster OPTIMIZE via incremental compaction |
-# | `native.enabled` | `true` | Native Execution Engine |
+# | `spark.databricks.delta.autoCompact.enabled` | `true` | Compacts small files after writes |
+# | `spark.databricks.delta.optimizeWrite.enabled` | `true` | Bin-packs data during writes |
+# | `spark.microsoft.delta.targetFileSize.adaptive.enabled` | `true` | Adapts target file size to workload |
+# | `spark.databricks.delta.properties.defaults.enableDeletionVectors` | `true` | Marks deleted rows instead of rewriting files |
+# | `spark.databricks.delta.optimize.fast.enabled` | `true` | Faster OPTIMIZE via incremental compaction |
+# | `spark.native.enabled` | `true` | Native Execution Engine |
 # 
 # > 💡 **The best optimization is the one you never have to run manually.**
-# 
-# ---
+

@@ -26,11 +26,11 @@
 
 # MARKDOWN ********************
 
-# # Module 1 — Optimizing Code
+# # **Module 1 — Optimizing Code**
 # 
 # Welcome to the first Fabric Jumpstart Spark performance lab for **Toy Brick Manufacturing**.
 # 
-# ## What this module teaches
+# ## **What this module teaches**
 # 
 # This module teaches you to recognize and fix **code-level** anti-patterns: the table design and cluster are fine, but the query as written is wrong or wasteful. You will also start using the diagnostic toolkit that Modules 2 and 3 reuse: Spark UI, `explain()` and physical plans, Delta metadata from `DESCRIBE DETAIL` / `DESCRIBE HISTORY`, and `inputFiles()`.
 # 
@@ -38,9 +38,9 @@
 
 # MARKDOWN ********************
 
-# ## Exercise summary
+# ## **Exercise summary**
 # 
-# | Exercise | Scenario | Expected performance signal |
+# | Exercise | Scenario | Outcome |
 # |---|---|---|
 # | 1 — Predicate pushdown | A daily defect-rate dashboard derives a string day before filtering `manufacturing_event`. | Fewer files read / filter pushed to FileScan; substring disappears from the filter path. |
 # | 2 — De-duplicate on the key, not the whole row | A "distinct orders" step calls `dropDuplicates()` with no subset, shuffling every column including the nested `order_lines` array. | FileScan ReadSchema shrinks; only the key columns are shuffled. |
@@ -105,7 +105,7 @@ print(json.dumps(TABLE_METRICS, default=str, indent=2))
 
 # ---
 # 
-# ## Exercise 1 — Predicate pushdown
+# ## **Exercise 1 — Predicate pushdown**
 # 
 # **Problem:** The daily defect-rate query transforms the timestamp into a string before filtering. That makes Spark scan more of `manufacturing_event` than the dashboard needs.
 # 
@@ -176,7 +176,7 @@ print(json.dumps(predicate_before_evidence, default=str, indent=2))
 
 # MARKDOWN ********************
 
-# ### 🎯 Challenge: Check the Spark Plan and Spark UI to diagnose the problem
+# ### 🎯 **Challenge: Check the Spark Plan and Spark UI to diagnose the problem**
 # 
 # You've seen that the query is slow, and you suspect it's because of the large number of files and the filter not being pushed down. You want to confirm this by checking the Spark Plan and the Spark UI.
 # 
@@ -271,7 +271,7 @@ result_predicate_after.explain(mode="formatted")
 
 # MARKDOWN ********************
 
-# ### 💡 What Just Happened?
+# ### 💡 *What Just Happened?*
 # 
 # Filtering on the **raw** `timestamp` column let Delta push the predicate into the file scan — notice `PushedFilters` now appears in the `DefaultDeltaScanTransformer` node. With the predicate at the scan, Spark uses each file's min/max statistics to **skip files** that can't contain the target day, so it reads a fraction of the table instead of all of it.
 # 
@@ -283,9 +283,7 @@ result_predicate_after.explain(mode="formatted")
 
 # MARKDOWN ********************
 
-# ---
-# 
-# ## Exercise 2 — De-duplicate on the key, not the whole row
+# ## **Exercise 2 — De-duplicate on the key, not the whole row**
 # 
 # **Problem:** A "distinct orders" step calls `distinct()` or `dropDuplicates` with no column list, so Spark uses every column as the de-duplication key — including the nested `order_lines` array.
 # 
@@ -345,7 +343,7 @@ proj_before_df.explain(mode="formatted")
 
 # MARKDOWN ********************
 
-# ### 🎯 Challenge
+# ### 🎯 **Challenge: Deduplicate on specific keys**
 # 
 # You only need distinct `customer_id` / `order_date` pairs. Rewrite the de-duplication so Spark reads and shuffles just those columns — either `select(...)` before `dropDuplicates()`, or pass the key subset to `dropDuplicates([...])`. Compare the scanned columns and the plan.
 
@@ -421,7 +419,7 @@ proj_after_df.explain(mode="formatted")
 
 # MARKDOWN ********************
 
-# ### 💡 What Just Happened?
+# ### 💡 *What Just Happened?*
 # 
 # `dropDuplicates()` (and `distinct()`) with no column list uses **every** column as the de-duplication key. Spark therefore scans the full row schema and shuffles all of it — including the nested `order_lines` array — through a `HashAggregate`, even though the business key is just `customer_id` + `order_date`.
 # 
@@ -433,7 +431,7 @@ proj_after_df.explain(mode="formatted")
 
 # MARKDOWN ********************
 
-# ## Exercise 3 — Prune columns before a window / row_number
+# ## **Exercise 3 — Prune columns before a window / row_number**
 # **Problem:** A "latest order per customer" step runs `row_number()` over the wide `web_order` row. The window has to shuffle (Exchange) and sort every column — including the nested `order_lines` array — even though only a few fields are needed.
 # **Why it matters:** A window with `partitionBy` / `orderBy` forces an Exchange + Sort. Whatever columns are on the DataFrame ride through that shuffle and sort, so carrying an unused nested array inflates the shuffle and sort spill for nothing.
 # **Fix in one line:** Project just the columns the window needs before applying it, so the Exchange and Sort move a narrow row.
@@ -487,7 +485,7 @@ latest_before.explain(mode="formatted")
 
 # MARKDOWN ********************
 
-# ### 🎯 Challenge
+# ### 🎯 **Challenge: Project a subset of columns**
 # You only need `customer_id`, `order_date`, and `order_total` to pick the latest order. Project those columns before the `row_number()` window so the Exchange and Sort move a narrow row and `order_lines` never enters the shuffle. Confirm the latest-row result is unchanged.
 
 # CELL ********************
@@ -574,11 +572,7 @@ latest_after.explain(mode="formatted")
 
 # MARKDOWN ********************
 
-# ---
-
-# MARKDOWN ********************
-
-# ### 💡 What Just Happened?
+# ### 💡 *What Just Happened?*
 # 
 # A window with `partitionBy` / `orderBy` forces an **Exchange (shuffle) + Sort**. Whatever columns are on the DataFrame ride through that shuffle and sort — so the baseline carried the entire wide row, including the nested `order_lines` array, just to pick the latest order per customer.
 # 
@@ -590,9 +584,11 @@ latest_after.explain(mode="formatted")
 
 # MARKDOWN ********************
 
-# ## Exercise 4 — One pass, not many (avoid repeated scans)
+# ## **Exercise 4 — One pass, not many (avoid repeated scans)**
 # **Problem:** A per-transaction-type report is built by looping over each `transaction_type`, filtering and aggregating `inventory_transaction` once per type, then unioning the results — so the table is scanned once per category.
+# 
 # **Why it matters:** Spark is excellent at joins and aggregations, but it will *not* merge independent filtered passes into a single read. Each pass re-scans the table, so the work grows with the number of categories instead of staying a single scan.
+# 
 # **Fix in one line:** Compute every bucket in one `groupBy(transaction_type)` (or conditional aggregation) so the table is scanned once.
 
 # CELL ********************
@@ -670,24 +666,6 @@ onepass_before_df.explain(mode="formatted")
 # META   "language_group": "synapse_pyspark"
 # META }
 
-# MARKDOWN ********************
-
-# ### 🎯 Challenge
-# Produce the same per-type totals with a single pass over `inventory_transaction`. Use one `groupBy("transaction_type")` aggregation so the plan contains a single scan, and confirm the totals match the looped version.
-
-# CELL ********************
-
-# Starter: compute every bucket in one pass instead of one query per type.
-onepass_starter_df = inv4  # TODO: groupBy("transaction_type").agg(count, sum(quantity))
-print("Scans in starter plan:", count_table_scans(onepass_starter_df))
-
-# METADATA ********************
-
-# META {
-# META   "language": "python",
-# META   "language_group": "synapse_pyspark"
-# META }
-
 # CELL ********************
 
 # ==================================================================================================
@@ -751,7 +729,7 @@ onepass_after_df.explain(mode="formatted")
 
 # MARKDOWN ********************
 
-# ### 💡 What Just Happened?
+# ### 💡 *What Just Happened?*
 # 
 # Spark does **not** merge independent filtered passes into a single read. Looping over each `transaction_type` — filter, aggregate, then `unionByName` — produced one `FileScan` of `inventory_transaction` **per category**, so the work grew linearly with the number of types.
 # 
@@ -763,9 +741,7 @@ onepass_after_df.explain(mode="formatted")
 
 # MARKDOWN ********************
 
-# ---
-# 
-# ## Exercise 5 — Cartesian / missing join key
+# ## **Exercise 5 — Cartesian / missing join key**
 # 
 # **Problem:** A pass-rate query combines `quality_inspection` with `production_order` without the production-order join key. A related cycle-time query uses an inequality self-join when it really needs the previous event per machine.
 # 
@@ -848,20 +824,14 @@ print(json.dumps(cartesian_before_evidence, default=str, indent=2))
 
 # MARKDOWN ********************
 
-# ### 🎯 Challenge
+# ### 🎯 **Challenge: Inspect the plan**
 # 
-# Inspect the plan for `CartesianProduct` or `BroadcastNestedLoopJoin`. Then rewrite the pass-rate query with the real key, `production_order_id`, so Spark can use an equi-join. For the cycle-time variant, replace the inequality self-join with `lag()` over a window.
+# Inspect the plan for `CartesianProduct` or `BroadcastNestedLoopJoin` to identify the root cause of the poor performance.
 
 # CELL ********************
 
 # Starter: inspect the missing-key plan and build the equi-join condition explicitly.
-result_cartesian_before.explain(mode="formatted")
-
-join_condition = F.col("qi_production_order_id") == F.col("po_production_order_id")
-starter_join_preview = qi.join(po, join_condition).select(
-    "qi_production_order_id", "po_production_order_id", "machine_id", "pass_count", "sample_size"
-).limit(5)
-display(starter_join_preview)
+result_cartesian_before # TODO: review the query plan
 
 # METADATA ********************
 
@@ -869,6 +839,22 @@ display(starter_join_preview)
 # META   "language": "python",
 # META   "language_group": "synapse_pyspark"
 # META }
+
+# MARKDOWN ********************
+
+# 
+# <details>
+#   <summary><strong>🔑 Solution:</strong> Click to reveal</summary>
+# 
+# <br/>
+# 
+# ```python
+# result_cartesian_before.explain(mode="formatted")
+# ```
+# 
+# </details>
+# 
+# ---
 
 # CELL ********************
 
@@ -930,7 +916,7 @@ result_cartesian_after.explain(mode="formatted")
 
 # MARKDOWN ********************
 
-# ### 💡 What Just Happened?
+# ### 💡 *What Just Happened?*
 # 
 # Without an equality predicate, Spark can only pair **every** left row with **every** right row — N × M pairs — which the plan exposes as `CartesianProduct` or `BroadcastNestedLoopJoin`. On real data this is where you see runaway shuffle, spill, executor loss, and OOM.
 # 
@@ -942,9 +928,7 @@ result_cartesian_after.explain(mode="formatted")
 
 # MARKDOWN ********************
 
-# ---
-# 
-# ## Exercise 6 — Python UDFs → native expressions
+# ## **Exercise 6 — Python UDFs → native expressions**
 # 
 # **Problem:** A top-customer spend query computes line totals and order days with scalar Python UDFs.
 # 
@@ -1039,7 +1023,7 @@ print(udf_before_plan[:1600])
 
 # MARKDOWN ********************
 
-# ### 🎯 Challenge
+# ### 🎯 **Challenge: Confirm BatchEvalPython disappears from the plan**
 # 
 # Both UDFs were rewritten as native Spark expressions (`coalesce` / arithmetic for the line total and `regexp_extract` (or a date function) for the order day). Re-run and confirm `BatchEvalPython` disappears from the plan.
 
@@ -1128,7 +1112,7 @@ restore_conf("spark.native.enabled")
 
 # MARKDOWN ********************
 
-# ### 💡 What Just Happened?
+# ### 💡 *What Just Happened?*
 # 
 # On the JVM, a scalar Python UDF forces a **JVM↔Python boundary** — the plan shows `BatchEvalPython` — where every row is serialized to a Python worker and back. That per-row round-trip, plus the loss of whole-stage codegen, is what makes UDFs slow.
 # 
@@ -1140,9 +1124,7 @@ restore_conf("spark.native.enabled")
 
 # MARKDOWN ********************
 
-# ---
-# 
-# ## Exercise 7 — `withColumn` in a loop → `withColumns`
+# ## **Exercise 7 — `withColumn` in a loop → `withColumns`**
 # 
 # **Problem:** Feature-engineering code adds many derived columns by chaining `.withColumn()` in a loop — one call per column.
 # 
@@ -1203,7 +1185,7 @@ print(f"{wc_before_analyzed[:3600]}...")
 
 # MARKDOWN ********************
 
-# ### 🎯 Challenge
+# ### 🎯 **Challenge: Replace `withColumn()` with `withColumns()`**
 # 
 # Replace the loop of `.withColumn()` calls with a single `.withColumns({...})` that maps each new column name to its expression. The result must match, with far fewer `Project` nodes in the analyzed plan.
 
@@ -1290,7 +1272,7 @@ print(f"{wc_before_analyzed[:3600]}...")
 
 # MARKDOWN ********************
 
-# ### 💡 What Just Happened?
+# ### 💡 *What Just Happened?*
 # 
 # Each `.withColumn()` call adds another nested `Project` node to the logical plan and re-resolves the schema on the driver. Chaining 100 of them built a plan with ~100 stacked `Project` nodes that is slow to analyze and optimize (and can even `StackOverflow` on deep chains) — all before a single row is processed.
 # 
@@ -1302,7 +1284,7 @@ print(f"{wc_before_analyzed[:3600]}...")
 
 # MARKDOWN ********************
 
-# ## Exercise 8 — Schema inference vs a declared schema
+# ## **Exercise 8 — Schema inference vs a declared schema**
 # 
 # **Problem:** Reading the JSON landing zone with `spark.read.json(...)` lets Spark **infer** the schema. To do that it must open and scan the files *before your query runs* — an eager, hidden startup cost that grows with the number of files.
 # 
@@ -1376,12 +1358,10 @@ static_df.printSchema()
 
 # MARKDOWN ********************
 
-# > 📝 **Key takeaway:** define schemas upfront for production pipelines.
-# > Inference is convenient for exploration but adds startup latency, especially when scanning thousands of small files.
 
 # MARKDOWN ********************
 
-# ### 💡 What Just Happened?
+# ### 💡 *What Just Happened?*
 # 
 # `spark.read.json(path)` with no schema makes Spark **infer** the columns and types — and to do that it must open and scan the files *before your query runs*. That is an eager, hidden startup cost that grows with the number of files, so on thousands of small landing-zone files the inference scan can dominate a job that otherwise reads very little.
 # 
@@ -1389,13 +1369,13 @@ static_df.printSchema()
 # 
 # > 📝 **Note:** A declared schema also protects you from silent type drift — inference can pick different types run-to-run as the data changes, whereas a static schema is deterministic.
 # 
+# > 📝 **Key takeaway:** define schemas upfront for production pipelines.
+# > Inference is convenient for exploration but adds startup latency, especially when scanning thousands of small files.
 # ---
 
 # MARKDOWN ********************
 
-# ---
-# 
-# ## Exercise 9 — Driver `collect()` / `toPandas()` and driver OOM
+# ## **Exercise 9 — Driver `collect()` / `toPandas()` and driver OOM**
 # 
 # **Problem:** The inventory workflow pulls every transaction to the driver with `collect()` and aggregates in Python. `.toPandas()` has the same raw-data movement risk.
 # 
@@ -1469,12 +1449,6 @@ print(json.dumps(driver_before_evidence, default=str, indent=2))
 # META   "language_group": "synapse_pyspark"
 # META }
 
-# MARKDOWN ********************
-
-# ### 🎯 Challenge
-# 
-# Rewrite the workflow so executors compute the net inventory by line. The driver should receive only the grouped result, not every raw transaction row. Use the Spark UI to compare task result size before and after.
-
 # CELL ********************
 
 # ==================================================================================================
@@ -1536,7 +1510,7 @@ result_driver_after.explain(mode="formatted")
 
 # MARKDOWN ********************
 
-# ### 💡 What Just Happened?
+# ### 💡 *What Just Happened?*
 # 
 # `collect()` (and `toPandas()`) pulls **every raw row** into the single driver process. That transfer can trip task-result transport limits, exhaust executor memory while serializing results, or blow past `spark.driver.maxResultSize` — and the aggregation then runs single-threaded in Python instead of across the cluster.
 # 
@@ -1548,9 +1522,7 @@ result_driver_after.explain(mode="formatted")
 
 # MARKDOWN ********************
 
-# ---
-# 
-# # 🏆 Performance Impact by Exercise
+# # 🏆 **Performance Impact by Exercise**
 # 
 # Execute the below to see the full impact across every exercise.
 # 
@@ -1558,12 +1530,7 @@ result_driver_after.explain(mode="formatted")
 
 # CELL ********************
 
-# ============================================================
-# SUMMARY — All benchmark results
-# ============================================================
-
 print_benchmark_summary()
-
 
 # METADATA ********************
 
@@ -1576,7 +1543,7 @@ print_benchmark_summary()
 
 # ---
 # 
-# ## Summary — Optimizing code
+# ## **Summary — Optimizing code**
 # 
 # You worked through nine code-level Spark anti-patterns, each with the same loop: benchmark the symptom, diagnose it in the physical plan, change one line, and re-check.
 # 
