@@ -35,6 +35,7 @@ Every exercise follows the same repeatable loop, so you build a durable performa
 
 - **`00_getting-started`** — verifies prerequisites, seeds the bronze Delta tables, and orients you to the data model.
 - **Three module notebooks** (`01_optimizing-code`, `02_optimizing-tables`, `03_optimizing-execution`) — each self-contained with challenge → solution flow, roughly **45 minutes** each.
+- **Two learning tracks for all three modules** — the same concepts, data, and benchmarks are offered as a **DataFrame API** track (`dataframe-lab/`) and a **Spark SQL** track (`sql-lab/`, using SparkSQL expressed within `spark.sql(...)`). Pick whichever API you use day-to-day; the exercise numbering is identical so you can switch between them. Spark SQL notebooks are suffixed `_sql`.
 - Shared benchmarking utilities and the sample lakehouse, environments, and Spark Job Definitions that build the data.
 
 ## Install the Lab in Fabric (Notebook, 2 cells)
