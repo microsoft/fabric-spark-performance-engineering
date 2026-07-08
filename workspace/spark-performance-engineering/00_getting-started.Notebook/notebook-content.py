@@ -106,8 +106,8 @@
 # 
 # | Track | Folder | How the queries are written |
 # |-------|--------|------------------------------|
-# | **DataFrame API** | `dataframe-notebooks/` | Fluent PySpark: `spark.table(...).filter(...).groupBy(...)` |
-# | **Spark SQL** | `sql-notebooks/` | `spark.sql("SELECT ... FROM ...")` from PySpark |
+# | **DataFrame API** | `dataframe-lab/` | Fluent PySpark: `spark.table(...).filter(...).groupBy(...)` |
+# | **Spark SQL** | `sql-lab/` | `spark.sql("SELECT ... FROM ...")` from PySpark |
 # 
 # The exercise numbering is identical across tracks, so you can switch back and forth. The
 # Spark SQL notebooks are suffixed `_sql` (e.g. `02_optimizing-tables_sql`). Module 2's SQL
