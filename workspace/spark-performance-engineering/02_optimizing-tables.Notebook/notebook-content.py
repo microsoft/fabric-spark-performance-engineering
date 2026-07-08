@@ -9,7 +9,7 @@
 # META   "dependencies": {
 # META     "lakehouse": {
 # META       "default_lakehouse": "28f1e957-ea23-49e8-846b-be0d8a67412e",
-# META       "default_lakehouse_name": "lego",
+# META       "default_lakehouse_name": "toy_bricks",
 # META       "default_lakehouse_workspace_id": "7fc5eff4-7153-4da9-b909-54981a3ffcdb",
 # META       "known_lakehouses": [
 # META         {
@@ -26,21 +26,18 @@
 
 # MARKDOWN ********************
 
-# # 🧱 **Module 2: Delta Table Design & Optimization**
+# # **Module 2 — Optimizing Tables**
 # 
-# Learn how to identify common Delta table performance problems, apply the right optimization, and validate the impact with before-and-after benchmarks.
+# Learn how to identify common Delta Lake table performance problems, apply the right optimizations, and validate the impact with before-and-after benchmarks.
 # 
-# **Duration:** 45 minutes | **Level:** 300–400
 # 
-# ---
+# ### **Scenario**
 # 
-# ### Scenario
-# 
-# The LEGO manufacturing analytics team ran their initial data pipeline with **every Spark and Delta optimization disabled** — no auto-compaction, no optimize-write, no adaptive query execution, no V-Order, no deletion vectors. The result? Thousands of tiny files, full table scans on every query, and painfully slow DML operations.
+# The Toy Bricks data engineering team ran their initial data pipeline with **common Spark and Delta optimizations disabled** — no auto-compaction, no optimize-write, no clustering. The result? Thousands of tiny files, full table scans on every query, and painfully slow DML operations.
 # 
 # **Your mission:** Fix each table live, one optimization at a time, and measure the impact.
 # 
-# ### Lab Pattern
+# ### **Lab Pattern**
 # 
 # Every exercise follows the same steps:
 # 
@@ -51,7 +48,7 @@
 # | 🔧 **Fix** | Apply the optimization |
 # | 🚀 **Re-benchmark** | Run the same test and compare against the baseline |
 # 
-# ### Exercises
+# ### **Exercises**
 # 
 # | # | Optimization | Table | What's broken |
 # |---|-------------|-------|----------------|
@@ -66,8 +63,6 @@
 
 # MARKDOWN ********************
 
-# ---
-# 
 # ## OPTIONAL - Run `source_to_bronze_optimized`
 # 
 # The Spark Job Definition `source_to_bronze` that was trigged in `00-getting-started` intentionally disables best practice configurations to highlight the impact of suboptimal table layout and compaction strategies. Run the `source_to_bronze_optimized` Spark Job Definition to see the impact on table layout health after the completion of the exercises in this notebook.
@@ -154,137 +149,9 @@ print(f"   Original tables in '{ORIG_SCHEMA}' are preserved for re-runs.")
 
 # MARKDOWN ********************
 
-# ### 🔍 Before We Tune: Let's See the Data
-# 
-# Before diving into configuration, let's peek at what we're working with. This is **real LEGO catalog data** — actual sets and themes that are combined with synthetic manufacturing and sales events.
-
-# CELL ********************
-
-# What LEGO sets are people ordering?
-print("🧱 Top 10 Most-Ordered LEGO Sets\n")
-display(spark.sql(f"""
-    SELECT s.name AS set_name, s.set_num, t.name AS theme, s.year, s.num_parts,
-           COUNT(*) AS times_ordered, ROUND(SUM(wol.extended_price), 2) AS total_revenue
-    FROM {ORIG_SCHEMA}.web_order_line wol
-    JOIN {ORIG_SCHEMA}.sets s ON wol.set_num = s.set_num
-    LEFT JOIN {ORIG_SCHEMA}.themes t ON s.theme_id = t.id
-    GROUP BY s.name, s.set_num, t.name, s.year, s.num_parts
-    ORDER BY times_ordered DESC
-    LIMIT 10
-"""))
-
-# METADATA ********************
-
-# META {
-# META   "language": "python",
-# META   "language_group": "synapse_pyspark"
-# META }
-
-# CELL ********************
-
-# What's happening on the factory floor?
-print("\n🏭 Manufacturing Defect Breakdown\n")
-display(spark.sql(f"""
-    SELECT defect_type, COUNT(*) AS defect_count,
-           ROUND(COUNT(*) * 100.0 / SUM(COUNT(*)) OVER(), 1) AS pct
-    FROM {ORIG_SCHEMA}.manufacturing_event
-    WHERE defect_detected = true
-    GROUP BY defect_type
-    ORDER BY defect_count DESC
-"""))
-
-# METADATA ********************
-
-# META {
-# META   "language": "python",
-# META   "language_group": "synapse_pyspark"
-# META }
-
-# MARKDOWN ********************
-
 # ---
 # 
-# # Warm-up: The Cost of Schema Inference
-# 
-# Before we even run queries, notice how long it takes to simply **discover the schema** from the landing zone. With thousands of small files, Spark must open many of them to infer column types — this is a hidden startup cost every time the pipeline restarts.
-# 
-# **Production best practice:** Define schemas statically so your pipeline starts instantly — no file scanning needed.
-# 
-# ---
-
-# CELL ********************
-
-# ============================================================
-# WARM-UP — Time schema inference on the landing zone
-# ============================================================
-
-# The unoptimized pipeline left thousands of small files in the landing zone.
-# Schema inference must scan these files to discover the schema.
-#
-# NOTE: spark.read.json() triggers inference EAGERLY at creation time,
-# so we must time the DataFrame construction itself — not an action.
-
-LANDING_TABLE = "manufacturing_event"
-landing_path = f"Files/landing/{LANDING_TABLE}"
-
-print(f"🐌 Inferring schema from landing zone: {landing_path}\n")
-print("   Spark must open files and read metadata to discover columns + types...\n")
-
-with benchmark_op("Schema Inference", "inferred (file scan)", spark):
-    inferred_df = spark.read.option("multiline", "true").json(landing_path)
-
-inferred_df.printSchema()
-
-# METADATA ********************
-
-# META {
-# META   "language": "python",
-# META   "language_group": "synapse_pyspark"
-# META }
-
-# CELL ********************
-
-# ============================================================
-# WARM-UP — Compare: static schema definition (instant)
-# ============================================================
-from pyspark.sql.types import StructType, StructField, StringType, TimestampType, IntegerType, BooleanType, DecimalType
-
-# A production pipeline defines the schema once in code — no file scanning needed
-static_schema = StructType([
-    StructField("EventId", StringType()),
-    StructField("Timestamp", TimestampType()),
-    StructField("MachineId", StringType()),
-    StructField("PartNum", StringType()),
-    StructField("ColorId", IntegerType()),
-    StructField("MoldTemp", DecimalType(5, 1)),
-    StructField("InjectionPressure", DecimalType(6, 1)),
-    StructField("CycleTimeMs", IntegerType()),
-    StructField("DefectDetected", BooleanType()),
-    StructField("DefectType", StringType()),
-    StructField("BatchId", StringType()),
-])
-
-with benchmark_op("Schema Inference", "static (no scan)", spark):
-    static_df = spark.read.schema(static_schema).json(landing_path)
-
-static_df.printSchema()
-
-print("\n📝 Takeaway: production pipelines define schemas upfront.")
-print("   Inference is convenient for exploration but adds startup latency,")
-print("   especially when scanning thousands of small files.")
-
-# METADATA ********************
-
-# META {
-# META   "language": "python",
-# META   "language_group": "synapse_pyspark"
-# META }
-
-# MARKDOWN ********************
-
-# ---
-# 
-# # Exercise 1: Fix the Small Files Problem
+# ## **Exercise 1 — Fix the Small Files Problem**
 # 
 # **Table:** `inventory_transaction` — high-frequency order lines from the web.
 # 
@@ -350,7 +217,7 @@ display(spark.sql(f"DESCRIBE DETAIL {FAST_SCHEMA}.web_order_line").select("forma
 
 # MARKDOWN ********************
 
-# ### 🎯 Challenge: Check the table file count and average file size
+# ### 🎯 **Challenge: Check the table file count and average file size**
 # 
 # You've seen the problem before, thousands of tiny files that makes performance regress. Can you confirm it?
 # 
@@ -440,7 +307,7 @@ metrics_1_after = show_metrics(f"{FAST_SCHEMA}.web_order_line", "after")
 
 # MARKDOWN ********************
 
-# ### 💡 What Just Happened?
+# ### 💡 *What Just Happened?*
 # 
 # `OPTIMIZE` rewrote all those tiny files into a smaller number of properly-sized files (~128 MB each). This is a **one-time reactive compaction** — it doesn't prevent small files from appearing again on the next write.
 # 
@@ -450,9 +317,7 @@ metrics_1_after = show_metrics(f"{FAST_SCHEMA}.web_order_line", "after")
 
 # MARKDOWN ********************
 
-# ---
-# 
-# # Exercise 2: Optimize Write
+# ## **Exercise 2 — Optimize Write**
 # 
 # **Table:** `inventory_transaction` — part movements across production lines
 # 
@@ -467,8 +332,7 @@ metrics_1_after = show_metrics(f"{FAST_SCHEMA}.web_order_line", "after")
 # 1. Analyze the Delta log to see the file-per-commit pattern from the original pipeline
 # 2. Replicate the problem with a test write
 # 3. Enable optimize write and repeat — see the difference
-# 
-# ---
+
 
 # CELL ********************
 
@@ -537,7 +401,7 @@ commit_stats_agg = (
 
 # MARKDOWN ********************
 
-# ### 🎯 Visualize file growth over time
+# ### 🎯 **Challenge: Visualize file growth over time**
 # Chart the cumulative files added over time vs. the cumulative files added if Optimize Write were enabled to bin-pack small partitions of data before writing.
 # 1. Select **New chart**
 # 1. Create a **Line Chart**
@@ -594,7 +458,7 @@ print(f"   ⚠️  New files created: {new_files_without_ow}")
 
 # MARKDOWN ********************
 
-# ### 🎯 Challenge: Mitigate Future Small Files
+# ### 🎯 **Challenge: Mitigate Future Small Files**
 # 
 # You've fixed the existing small files with OPTIMIZE. But new writes will create small files again unless you change the table's write behavior.
 # 
@@ -688,7 +552,7 @@ benchmarks["Exercise 2: Optimize Write"] = {
 
 # MARKDOWN ********************
 
-# ### 💡 What Just Happened?
+# ### 💡 *What Just Happened?*
 # 
 # Without optimize write, Spark wrote one file per output partition — even though the data was tiny. With optimize write enabled, Spark **bin-packs** the data at write time, coalescing small partitions into properly-sized files.
 # 
@@ -703,9 +567,7 @@ benchmarks["Exercise 2: Optimize Write"] = {
 
 # MARKDOWN ********************
 
-# ---
-# 
-# # Exercise 3: Liquid Clustering
+# ## **Exercise 3 — Liquid Clustering**
 # 
 # **Table:** `manufacturing_event`
 # 
@@ -717,8 +579,6 @@ benchmarks["Exercise 2: Optimize Write"] = {
 # - Gets worse as the table grows
 # 
 # **Fix:** [Liquid clustering](https://learn.microsoft.com/en-us/fabric/data-engineering/liquid-clustering?tabs=sparksql) — co-locates related rows in the same files so Delta can skip irrelevant files entirely.
-# 
-# ---
 
 # CELL ********************
 
@@ -777,7 +637,7 @@ metrics_3_after = show_metrics(f"{FAST_SCHEMA}.manufacturing_event", "after clus
 
 # MARKDOWN ********************
 
-# ### 🎯 Challenge: Check Liquid Clustering Quality Metrics
+# ### 🎯 **Challenge: Check Liquid Clustering Quality Metrics**
 # 
 # `OPTIMIZE` metrics in Fabric Spark Runtime 2.0 contains a `clusteringQuality` struct. Query the struct to see the clustering quality.
 # 
@@ -851,7 +711,7 @@ print("   with healthy clustering (see skippingEffectiveness in the prior cell),
 
 # MARKDOWN ********************
 
-# ### 💡 What Just Happened?
+# ### 💡 *What Just Happened?*
 # 
 # Liquid clustering **physically re-organizes data** so rows with similar `PartNum` and `TransactionType` values end up in the same files. Delta's min/max file statistics can then immediately skip files that don't contain matching values.
 # 
@@ -866,11 +726,9 @@ print("   with healthy clustering (see skippingEffectiveness in the prior cell),
 
 # MARKDOWN ********************
 
-# ---
+# ## **Exercise 4 — Deletion Vectors**
 # 
-# # Exercise 4: Deletion Vectors
-# 
-# **Table:** `web_order_line` — order line items for LEGO set purchases
+# **Table:** `web_order_line` — order line items for set purchases
 # 
 # **Columns:** `OrderId`, `LineNumber`, `SetNum`, `PartNum`, `ItemName`, `Quantity`, `UnitPrice`, `ExtendedPrice`
 # 
@@ -882,8 +740,7 @@ print("   with healthy clustering (see skippingEffectiveness in the prior cell),
 # - `MERGE` operations (common in ETL) suffer the same penalty
 # 
 # **Fix:** [Deletion vectors](https://learn.microsoft.com/fabric/data-engineering/delta-optimization-and-v-order?tabs=sparksql#deletion-vectors) — instead of rewriting files, Delta writes a small sidecar file that marks which rows are logically deleted. The original data files stay untouched.
-# 
-# ---
+
 
 # CELL ********************
 
@@ -1026,7 +883,7 @@ print(f"   The original data files were NOT rewritten — massive write amplific
 
 # ---
 # 
-# # Exercise 5: Data Skipping Stats on Wide Tables
+# ## **Exercise 5 — Data Skipping Stats on Wide Tables**
 # 
 # **Table:** `production_analysis` — a denormalized join of manufacturing events, production lines, molds, colors, parts, and part categories.
 # 
@@ -1043,17 +900,15 @@ print(f"   The original data files were NOT rewritten — massive write amplific
 # 2. Try to enable clustering → hit the `DELTA_CLUSTERING_COLUMN_MISSING_STATS` error
 # 3. Unblock: extend stats coverage, rewrite files, then cluster
 # 4. Measure the improvement
-# 
-# ---
 
 
 # CELL ********************
 
 # ============================================================
-# 5⃣ SETUP — Create a wide denormalized table
+# 5️⃣ SETUP — Create a wide denormalized table
 # ============================================================
 
-# Join LEGO manufacturing tables into a single wide table (35+ columns).
+# Join manufacturing tables into a single wide table (35+ columns).
 # manufacturing_event is the high-frequency IoT fact table — the biggest in the lakehouse.
 # The target filter column (part_num) will land PAST position 32.
 
@@ -1155,7 +1010,7 @@ for i, col in enumerate(wide_df.columns, 1):
 
 # CELL ********************
 
-# 🧱 Let's explore the wide table — look at the LEGO manufacturing data!
+# 🧱 Let's explore the wide table — look at the manufacturing data!
 print("🏭 Sample rows from the wide denormalized table\n")
 display(spark.sql(f"""
     SELECT part_num, part_name, plant, color_name,
@@ -1187,7 +1042,7 @@ display(spark.sql(f"""
 # CELL ********************
 
 # ============================================================
-# 5⃣ BENCHMARK — Query filtering on a column past position 32
+# 5️⃣ BENCHMARK — Query filtering on a column past position 32
 # ============================================================
 
 # Pick a frequently produced part to filter on
@@ -1234,7 +1089,7 @@ with benchmark_op("Data Skipping Stats", "before (no stats past col 32)", spark)
 # CELL ********************
 
 # ============================================================
-# 5⃣ DIAGNOSE — Try to enable clustering on theme_name
+# 5️⃣ DIAGNOSE — Try to enable clustering on theme_name
 # ============================================================
 
 # You might think: "just cluster on theme_name to co-locate the data!"
@@ -1284,7 +1139,7 @@ print(f"   part_num position: {wide_df.columns.index('part_num') + 1} \u2190 not
 
 # MARKDOWN ********************
 
-# ### 🎯 Challenge: Unblock Clustering on `part_num`
+# ### 🎯 **Challenge: Unblock Clustering on `part_num`**
 # 
 # You saw the `DELTA_CLUSTERING_COLUMN_MISSING_STATS` error. Stats are only collected for the first 32 columns, and `part_num` is at position 33.
 # 
@@ -1353,7 +1208,7 @@ WIDE_TABLE = "production_analysis"
 # CELL ********************
 
 # ============================================================
-# 5⃣ RE-BENCHMARK — Same query, now with stats + clustering
+# 5️⃣ RE-BENCHMARK — Same query, now with stats + clustering
 # ============================================================
 
 WIDE_TABLE = "production_analysis"
@@ -1391,7 +1246,7 @@ with benchmark_op("Data Skipping Stats", "after (stats + clustering)", spark):
 
 # MARKDOWN ********************
 
-# ### 💡 What Just Happened?
+# ### 💡 *What Just Happened?*
 # 
 # Delta Lake collects **min/max statistics** per column per file. These stats power **data skipping** — the ability to prune entire files from a scan when the filter value falls outside a file’s min/max range.
 # 
@@ -1420,63 +1275,15 @@ with benchmark_op("Data Skipping Stats", "after (stats + clustering)", spark):
 
 # MARKDOWN ********************
 
-# ---
+# # 🏆 **Performance Impact by Exercise**
 # 
-# # 🏆 Summary Dashboard
+# Execute the below to see the full impact across every exercise.
 # 
-# All five optimizations applied. Here's the full impact across every exercise.
-# 
-# ---
 
 
 # CELL ********************
 
-# ============================================================
-# SUMMARY — All benchmark results
-# ============================================================
-
-print("=" * 62)
-print("  🏆  PERFORMANCE IMPACT SUMMARY")
-print("=" * 62)
-
-for scenario, states in benchmarks.items():
-    if isinstance(states, dict):
-        baseline_key = next(iter(states))
-        baseline_ms = states[baseline_key]
-        best_ms = min(states.values())
-        W = 58
-        print(f"\n  \u250c{'\u2500' * W}\u2510")
-        title = f"\033[1m{scenario}\033[0m"
-        title_pad = W - 2 - len(scenario)
-        print(f"  \u2502  {title}{' ' * title_pad}\u2502")
-        print(f"  \u251c{'\u2500' * W}\u2524")
-        print(f"  \u2502  {'State':<28}{'Time (ms)':>12}{'Factor':>14}  \u2502")
-        print(f"  \u251c{'\u2500' * W}\u2524")
-        for s, ms in states.items():
-            ratio = baseline_ms / max(ms, 0.001)
-            if s == baseline_key:
-                visible_tag = "baseline"
-                tag = visible_tag
-            elif ms <= best_ms:
-                visible_tag = f"{ratio:.1f}x faster"
-                tag = f"\033[1;32m{visible_tag}\033[0m"
-            else:
-                visible_tag = f"{ratio:.1f}x"
-                tag = f"\033[1;34m{visible_tag}\033[0m"
-            pad = 14 - len(visible_tag)
-            print(f"  \u2502  {s:<28}{ms:>12.2f}{' ' * pad}{tag}  \u2502")
-        print(f"  \u2514{'\u2500' * W}\u2518")
-
-print(f"\n{'=' * 62}")
-print("""
-KEY TAKEAWAYS
-──────────────
-1. OPTIMIZE compacts small files — but it's REACTIVE (run after the damage)
-2. Optimize Write bin-packs at write time — PROACTIVE, prevents small files at source
-3. Liquid clustering enables data skipping — selective queries skip irrelevant files
-4. Deletion vectors eliminate write amplification — DELETEs don't rewrite files
-5. Data skipping stats must cover filter columns — wide tables need explicit config
-""")
+print_benchmark_summary()
 
 # METADATA ********************
 
@@ -1487,23 +1294,30 @@ KEY TAKEAWAYS
 
 # MARKDOWN ********************
 
+# ### **KEY TAKEAWAYS**
+# 
+# 1. OPTIMIZE compacts small files — but it's REACTIVE (run after the damage)
+# 2. Optimize Write bin-packs at write time — PROACTIVE, prevents small files at source
+# 3. Liquid clustering enables data skipping — selective queries skip irrelevant files
+# 4. Deletion vectors eliminate write amplification — DELETEs don't rewrite files
+# 5. Data skipping stats must cover filter columns — wide tables need explicit config
+
+# MARKDOWN ********************
+
 # ---
 # 
-# ### 📝 What the Optimized Pipeline Configures Automatically
+# ### 📝 *What the Optimized Pipeline Configures Automatically*
 # 
-# The `seed_lego_delta_tables` Spark Job Definition uses ArcFlow's `SparkConfigurator` to set these best-practice configs at session startup:
+# Based on this workload performing frequent small writes, the `source_to_bronze` Spark Job Definition uses ArcFlow's `SparkConfigurator` to set these best-practice configs at session startup:
 # 
 # | Setting | Value | What it does |
 # |---------|-------|-------------|
-# | `autoCompact.enabled` | `true` | Compacts small files after writes |
-# | `optimizeWrite.enabled` | `true` | Bin-packs data during writes |
-# | `targetFileSize.adaptive.enabled` | `true` | Adapts target file size to workload |
-# | `enableDeletionVectors` | `true` | Marks deleted rows instead of rewriting files |
-# | `optimize.fast.enabled` | `true` | Faster OPTIMIZE via incremental compaction |
-# | `parquet.compression.codec` | `zstd` | Better compression ratio than snappy |
-# | `sql.adaptive.enabled` | `true` | Adaptive Query Execution (AQE) |
-# | `native.enabled` | `true` | Native Execution Engine |
+# | `spark.databricks.delta.autoCompact.enabled` | `true` | Compacts small files after writes |
+# | `spark.databricks.delta.optimizeWrite.enabled` | `true` | Bin-packs data during writes |
+# | `spark.microsoft.delta.targetFileSize.adaptive.enabled` | `true` | Adapts target file size to workload |
+# | `spark.databricks.delta.properties.defaults.enableDeletionVectors` | `true` | Marks deleted rows instead of rewriting files |
+# | `spark.databricks.delta.optimize.fast.enabled` | `true` | Faster OPTIMIZE via incremental compaction |
+# | `spark.native.enabled` | `true` | Native Execution Engine |
 # 
 # > 💡 **The best optimization is the one you never have to run manually.**
-# 
-# ---
+

@@ -225,6 +225,158 @@ def benchmark_op(scenario: str, state: str, spark=None):
     return BenchmarkTimer(scenario, state, spark)
 
 
+# ---------------------------------------------------------------------------
+# Shared lab helpers — imported by every module via `%run _benchmark_utils`
+# so modules do not redefine their own niche functions.
+# ---------------------------------------------------------------------------
+import json
+import re
+
+results = []          # qualitative validation records (see record_result)
+_ORIGINAL_CONF = {}   # snapshot for remember_conf / restore_conf
+
+
+def table_ref(name: str, schema: str = "bronze") -> str:
+    """Backtick-quoted `schema`.`table` reference."""
+    return f"`{schema}`.`{name}`"
+
+
+def reset_work_schema(schema: str) -> None:
+    """Drop and recreate an isolated work schema (idempotent)."""
+    spark.sql(f"DROP SCHEMA IF EXISTS {schema} CASCADE")
+    spark.sql(f"CREATE SCHEMA {schema}")
+    print(f"✅ Work schema reset: {schema}")
+
+
+def require_tables(expected, schema: str = "bronze"):
+    """Raise if any expected source table is missing; return the available set."""
+    available = {row.tableName for row in spark.sql(f"SHOW TABLES IN `{schema}`").collect()}
+    missing = [t for t in expected if t not in available]
+    if missing:
+        raise RuntimeError(f"Missing required tables in schema {schema}: {missing}")
+    return available
+
+
+def remember_conf(key: str) -> None:
+    """Snapshot a Spark conf value once so it can be restored later.
+
+    Capture the *effective* value (including Spark/Fabric defaults) rather than
+    ``get(key, None)``: some confs (e.g. spark.sql.shuffle.partitions) are not
+    explicit session entries, so a ``None`` snapshot would make restore_conf unset
+    the key instead of re-applying the real default, leaking a prior override.
+    """
+    if key not in _ORIGINAL_CONF:
+        try:
+            _ORIGINAL_CONF[key] = spark.conf.get(key)
+        except Exception:
+            _ORIGINAL_CONF[key] = None
+
+
+def restore_conf(key: str) -> None:
+    """Restore a Spark conf value captured by remember_conf."""
+    if key in _ORIGINAL_CONF:
+        value = _ORIGINAL_CONF[key]
+        if value is None:
+            spark.conf.unset(key)
+        else:
+            spark.conf.set(key, value)
+
+
+def set_job(label: str) -> None:
+    """Set the Spark job description shown in the Spark UI."""
+    spark.sparkContext.setJobDescription(label)
+
+
+def plan_string(df: DataFrame) -> str:
+    """Executed physical plan as a string."""
+    return df._jdf.queryExecution().executedPlan().toString()
+
+
+def explain_string(df: DataFrame) -> str:
+    """Full queryExecution string (parsed / analyzed / optimized / physical)."""
+    return df._jdf.queryExecution().toString()
+
+
+def scan_filters(df: DataFrame) -> dict:
+    """Extract DataFilters / PushedFilters from the last FileScan node."""
+    file_scans = [node for node in plan_string(df).split("\n") if "FileScan" in node]
+    last_file_scan = file_scans[-1].strip() if file_scans else ""
+    data_filters = re.search(r"DataFilters: \[(.*?)\]", last_file_scan)
+    pushed_filters = re.search(r"PushedFilters: \[(.*?)\]", last_file_scan)
+    return {
+        "fileScan": last_file_scan,
+        "dataFilters": data_filters.group(1) if data_filters else "",
+        "pushedFilters": pushed_filters.group(1) if pushed_filters else "",
+    }
+
+
+# Native Execution Engine (NEE) fallback analysis.
+_nee_block_pattern = re.compile(
+    r"(?ms)^\s*\+-\s*RowToVeloxColumnar\b[^\n]*\n(?P<block>.*?)^\s*\+-\s*VeloxColumnarToRow\b"
+)
+_nee_op_pattern = re.compile(
+    r"(?m)^\s*\+-\s*(?:\^\(\d+\)\s*)?(?P<op>[A-Za-z][A-Za-z0-9]*)\b"
+)
+
+
+def extract_nee_fallbacks(plan: str) -> dict:
+    """Count Velox->row fallback blocks and operators in a physical plan string."""
+    fallback_blocks = []
+    fallback_operations = []
+    for match in _nee_block_pattern.finditer(plan):
+        block_text = match.group("block")
+        block_lines = [line.strip() for line in block_text.split("\n") if line.strip()]
+        block_ops = _nee_op_pattern.findall(block_text)
+        fallback_blocks.append({"operations": block_lines, "operatorNames": block_ops})
+        fallback_operations.extend(block_ops)
+    return {
+        "blockCount": len(fallback_blocks),
+        "operatorCount": len(fallback_operations),
+        "operators": fallback_operations,
+        "blocks": fallback_blocks,
+    }
+
+
+def table_metrics(name: str, schema: str = "bronze") -> dict:
+    """Rich Delta metrics: rows, files, size, avg file size, format, partitions."""
+    ref = table_ref(name, schema)
+    detail_metrics = get_table_metrics(ref)
+    detail = spark.sql(f"DESCRIBE DETAIL {ref}").collect()[0].asDict()
+    return {
+        "table": f"{schema}.{name}",
+        "rows": spark.table(ref).count(),
+        "numFiles": int(detail.get("numFiles") or detail_metrics.get("num_files") or 0),
+        "sizeMB": float(detail_metrics.get("size_mb") or 0),
+        "avgFileKB": float(detail_metrics.get("avg_file_kb") or 0),
+        "format": detail.get("format"),
+        "partitions": spark.table(ref).rdd.getNumPartitions(),
+    }
+
+
+def recent_history(name: str, schema: str = "bronze", limit: int = 3) -> list:
+    """Recent DESCRIBE HISTORY rows (version, timestamp, operation)."""
+    return [
+        row.asDict()
+        for row in spark.sql(f"DESCRIBE HISTORY {table_ref(name, schema)}")
+        .select("version", "timestamp", "operation")
+        .limit(limit)
+        .collect()
+    ]
+
+
+def record_result(exercise: str, phase: str, evidence: dict) -> dict:
+    """
+    Append a qualitative validation record and print it.
+
+    Use in CHECK-CHANGES / re-benchmark steps to capture before/after evidence.
+    DIAGNOSE steps should only print (do not record).
+    """
+    row = {"exercise": exercise, "phase": phase, "evidence": evidence}
+    results.append(row)
+    print("RESULT\n" + json.dumps(row, default=str, indent=2))
+    return row
+
+
 def _benchmark(self: DataFrame, scenario: str, state: str):
     """
     Start a timed benchmark. Chain operations, then call a terminal action.
@@ -238,6 +390,35 @@ def _benchmark(self: DataFrame, scenario: str, state: str):
 
 
 DataFrame.benchmark = _benchmark
+
+def print_benchmark_summary():
+    for scenario, states in benchmarks.items():
+        if isinstance(states, dict):
+            baseline_key = next(iter(states))
+            baseline_ms = states[baseline_key]
+            best_ms = min(states.values())
+            W = 58
+            print(f"\n  \u250c{'\u2500' * W}\u2510")
+            title = f"\033[1m{scenario}\033[0m"
+            title_pad = W - 2 - len(scenario)
+            print(f"  \u2502  {title}{' ' * title_pad}\u2502")
+            print(f"  \u251c{'\u2500' * W}\u2524")
+            print(f"  \u2502  {'State':<28}{'Time (ms)':>12}{'Factor':>14}  \u2502")
+            print(f"  \u251c{'\u2500' * W}\u2524")
+            for s, ms in states.items():
+                ratio = baseline_ms / max(ms, 0.001)
+                if s == baseline_key:
+                    visible_tag = "baseline"
+                    tag = visible_tag
+                elif ms <= best_ms:
+                    visible_tag = f"{ratio:.1f}x faster"
+                    tag = f"\033[1;32m{visible_tag}\033[0m"
+                else:
+                    visible_tag = f"{ratio:.1f}x"
+                    tag = f"\033[1;34m{visible_tag}\033[0m"
+                pad = 14 - len(visible_tag)
+                print(f"  \u2502  {s:<28}{ms:>12.2f}{' ' * pad}{tag}  \u2502")
+            print(f"  \u2514{'\u2500' * W}\u2518")
 
 # METADATA ********************
 

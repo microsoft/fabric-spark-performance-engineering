@@ -1,12 +1,11 @@
 {
   "$schema": "https://developer.microsoft.com/json-schemas/fabric/gitIntegration/platformProperties/2.0.0/schema.json",
   "metadata": {
-    "type": "Notebook",
-    "displayName": "01-lab-diagnostics-factory-dashboard-slow-sql",
-    "description": ""
+    "type": "Lakehouse",
+    "displayName": "toy_bricks_optimized"
   },
   "config": {
     "version": "2.0",
-    "logicalId": "ddb9facd-5ec7-838b-4ad7-59b01050ef64"
+    "logicalId": "f7c380ce-5d5b-8bd1-4cc5-7202738c9f7c"
   }
 }

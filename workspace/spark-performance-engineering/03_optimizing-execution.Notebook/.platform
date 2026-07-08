@@ -1,0 +1,12 @@
+{
+  "$schema": "https://developer.microsoft.com/json-schemas/fabric/gitIntegration/platformProperties/2.0.0/schema.json",
+  "metadata": {
+    "type": "Notebook",
+    "displayName": "03_optimizing-execution",
+    "description": "Learn to solve common performance issues where the root cause is how Spark is executing"
+  },
+  "config": {
+    "version": "2.0",
+    "logicalId": "9954445c-4c04-4882-a533-cca74e2d52b9"
+  }
+}

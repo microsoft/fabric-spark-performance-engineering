@@ -2,7 +2,7 @@ find_replace:
   # lakehouse GUID matching group 1 of regex pattern to be replaced
   - find_value: \#\s*META\s+"default_lakehouse":\s*"([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})"
     replace_value:
-      _ALL_: "$items.Lakehouse.lego.$id" # lakehouse GUID (dynamic)
+      _ALL_: "$items.Lakehouse.toy_bricks.$id" # lakehouse GUID (dynamic)
     is_regex: "true"
     item_type: "Notebook" # filter on notebook files
   # workspace ID matching group 1 of regex pattern to be replaced
@@ -11,23 +11,24 @@ find_replace:
       _ALL_: "$workspace.$id" # workspace ID (dynamic)
     is_regex: "true"
     item_type: "Notebook" # filter on notebook files
-  # lakehouse GUID in known_lakehouses array
-  - find_value: aa7b8001-02f5-4fba-b3a1-8e94fd023e2f
+  # lakehouse GUID in known_lakehouses array (matches group 1 of regex pattern)
+  - find_value: \#\s*META\s+"id":\s*"([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})"
     replace_value:
-      _ALL_: "$items.Lakehouse.lego.$id" # lakehouse GUID (dynamic)
+      _ALL_: "$items.Lakehouse.toy_bricks.$id" # lakehouse GUID (dynamic)
+    is_regex: "true"
     item_type: "Notebook" # filter on notebook files
 
   # Spark Job Definition
   - find_value: \s+"defaultLakehouseArtifactId":\s*"([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})"
     replace_value:
-      _ALL_: "$items.Lakehouse.lego.$id" # lakehouse GUID (dynamic)
+      _ALL_: "$items.Lakehouse.toy_bricks.$id" # lakehouse GUID (dynamic)
     is_regex: "true"
     item_type: "SparkJobDefinition" # filter on notebook files
     item_name: ["source_to_bronze"] # filter on specific notebook files
 
   - find_value: \s+"defaultLakehouseArtifactId":\s*"([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})"
     replace_value:
-      _ALL_: "$items.Lakehouse.lego_optimized.$id" # lakehouse GUID (dynamic)
+      _ALL_: "$items.Lakehouse.toy_bricks_optimized.$id" # lakehouse GUID (dynamic)
     is_regex: "true"
     item_type: "SparkJobDefinition" # filter on notebook files
     item_name: ["source_to_bronze_optimized"] # filter on specific notebook files
@@ -38,14 +39,14 @@ find_replace:
       _ALL_: "$items.SparkJobDefinition.source_to_bronze.$id" # SJD GUID (dynamic)
     is_regex: "false"
     item_type: "Notebook" # filter on notebook files
-    item_name: ["00-getting-started"] # filter on specific notebook files
+    item_name: ["00_getting-started"] # filter on specific notebook files
 
   - find_value: $workspaceId
     replace_value:
       _ALL_: "$workspace.$id" # workspace ID (dynamic)
     is_regex: "false"
     item_type: "Notebook" # filter on notebook files
-    item_name: ["00-getting-started"] # filter on specific notebook files
+    item_name: ["00_getting-started"] # filter on specific notebook files
 
   # Update SJD URL in Notebook Markdown
   - find_value: $sparkJobDefinitionId
@@ -53,11 +54,11 @@ find_replace:
       _ALL_: "$items.SparkJobDefinition.source_to_bronze_optimized.$id" # SJD GUID (dynamic)
     is_regex: "false"
     item_type: "Notebook" # filter on notebook files
-    item_name: ["02-delta-table-design-and-optimization"] # filter on specific notebook files
+    item_name: ["02_optimize-tables"] # filter on specific notebook files
 
   - find_value: $workspaceId
     replace_value:
       _ALL_: "$workspace.$id" # workspace ID (dynamic)
     is_regex: "false"
     item_type: "Notebook" # filter on notebook files
-    item_name: ["02-delta-table-design-and-optimization"] # filter on specific notebook files
+    item_name: ["02_optimize-tables"] # filter on specific notebook files
