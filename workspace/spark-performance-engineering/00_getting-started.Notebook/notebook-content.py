@@ -99,6 +99,21 @@
 # | **2 — Optimizing Tables** | `02_optimizing-tables` | Change the data at rest | OPTIMIZE / compaction, Optimize Write, liquid clustering & data-skipping stats, deletion vectors, data types, partitioning strategy, storage-regression auditing (`DESCRIBE HISTORY`) |
 # | **3 — Optimizing Execution** | `03_optimizing-execution` | Tune how Spark runs it | Join strategies & broadcast, AQE & skew / salting, shuffle-partition sizing & spill, caching / materialization, streaming |
 # 
+# ### 🔀 Choose your track — DataFrame API or Spark SQL
+# 
+# **All three modules** ship in **two parallel tracks** that teach the exact same concepts,
+# data, and benchmarks — pick whichever API you write day-to-day (or do both):
+# 
+# | Track | Folder | How the queries are written |
+# |-------|--------|------------------------------|
+# | **DataFrame API** | `dataframe-lab/` | Fluent PySpark: `spark.table(...).filter(...).groupBy(...)` |
+# | **Spark SQL** | `sql-lab/` | `spark.sql("SELECT ... FROM ...")` from PySpark |
+# 
+# The exercise numbering is identical across tracks, so you can switch back and forth. The
+# Spark SQL notebooks are suffixed `_sql` (e.g. `02_optimizing-tables_sql`). Module 2's SQL
+# track uses a separate lab schema (`bronze_fast_sql`) so both tracks can run side by side
+# against the same lakehouse.
+# 
 # **How Modules 1 and 3 differ:** Module 1 is when the *query is written badly* (fix = edit the
 # code). Module 3 is when the code and tables are fine but Spark *executes* it sub-optimally
 # (fix = a hint / config / `.cache()` / repartition, with the logic unchanged). Module 2 is when

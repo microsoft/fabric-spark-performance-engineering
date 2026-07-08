@@ -1312,8 +1312,7 @@ print("   Spark must open files and read metadata to discover columns + types...
 
 with benchmark_op("Avoid Schema Inference in Production", "inferred (file scan)", spark):
     inferred_df = spark.read.option("multiline", "true").json(landing_path)
-
-inferred_df.printSchema()
+    inferred_df.printSchema()
 
 # METADATA ********************
 
@@ -1346,8 +1345,7 @@ static_schema = StructType([
 
 with benchmark_op("Avoid Schema Inference in Production", "static (no scan)", spark):
     static_df = spark.read.schema(static_schema).json(landing_path)
-
-static_df.printSchema()
+    static_df.printSchema()
 
 # METADATA ********************
 
@@ -1400,7 +1398,7 @@ print(f"About to collect {TABLE_METRICS['inventory_transaction']['rows']:,} inve
 print("spark.driver.maxResultSize =", spark.conf.get("spark.driver.maxResultSize"))
 
 start = time.time()
-with benchmark_op("Driver Collect vs Keeping Data Distributed", "Keeping Data Distributed", spark):
+with benchmark_op("Driver Collect vs Keeping Data Distributed", "Driver Collect", spark):
     collected_inventory = inv.collect()
 
 with benchmark_op("Aggregations - Driver vs Distributed", "Driver", spark):

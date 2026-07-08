@@ -175,14 +175,16 @@ print(f"   Original tables in '{ORIG_SCHEMA}' are preserved for re-runs.")
 print("🐌 Running baseline query on web_order_line...\n")
 
 with benchmark_op("OPTIMIZE (compaction)", "before", spark):
-    order_query = spark.sql(f"""
-        SELECT
-            set_num,
-            SUM(quantity) AS total_quantity,
-            SUM(extended_price) AS total_revenue,
-            AVG(unit_price) AS avg_price
-        FROM {FAST_SCHEMA}.web_order_line GROUP BY set_num
-        """).collect()
+    order_query = (
+        spark.table(f"{FAST_SCHEMA}.web_order_line")
+        .groupBy("set_num")
+        .agg(
+            F.sum("quantity").alias("total_quantity"),
+            F.sum("extended_price").alias("total_revenue"),
+            F.avg("unit_price").alias("avg_price"),
+        )
+        .collect()
+    )
 
 # METADATA ********************
 
@@ -205,8 +207,8 @@ if metrics_1_before["avg_file_kb"] < 1024:
     print(f"\n   ⚠️  Average file is {metrics_1_before['avg_file_kb']:.0f} KB — optimal target is ~128 MB (131,072 KB)")
     print(f"   ⚠️  Files are {ratio:,}× smaller than they should be")
 
-print("\n📋 DESCRIBE DETAIL:")
-display(spark.sql(f"DESCRIBE DETAIL {FAST_SCHEMA}.web_order_line").select("format", "numFiles", "sizeInBytes"))
+print("\n📋 Table detail:")
+display(DeltaTable.forName(spark, f"{FAST_SCHEMA}.web_order_line").detail().select("format", "numFiles", "sizeInBytes"))
 
 # METADATA ********************
 
@@ -287,14 +289,16 @@ display(result)
 print("🚀 Running same query after OPTIMIZE...\n")
 
 with benchmark_op("OPTIMIZE (compaction)", "after", spark):
-    order_query = spark.sql(f"""
-        SELECT
-            set_num,
-            SUM(quantity) AS total_quantity,
-            SUM(extended_price) AS total_revenue,
-            AVG(unit_price) AS avg_price
-        FROM {FAST_SCHEMA}.web_order_line GROUP BY set_num
-        """).collect()
+    order_query = (
+        spark.table(f"{FAST_SCHEMA}.web_order_line")
+        .groupBy("set_num")
+        .agg(
+            F.sum("quantity").alias("total_quantity"),
+            F.sum("extended_price").alias("total_revenue"),
+            F.avg("unit_price").alias("avg_price"),
+        )
+        .collect()
+    )
 
 metrics_1_after = show_metrics(f"{FAST_SCHEMA}.web_order_line", "after")
 
@@ -342,7 +346,7 @@ metrics_1_after = show_metrics(f"{FAST_SCHEMA}.web_order_line", "after")
 from pyspark.sql.window import Window
 print("🔍 Analyzing Delta transaction log for inventory_transaction...\n")
 
-history = spark.sql(f"DESCRIBE HISTORY {ORIG_SCHEMA}.inventory_transaction")
+history = DeltaTable.forName(spark, f"{ORIG_SCHEMA}.inventory_transaction").history()
 
 w = Window.orderBy("version").rowsBetween(Window.unboundedPreceding, Window.currentRow)
 

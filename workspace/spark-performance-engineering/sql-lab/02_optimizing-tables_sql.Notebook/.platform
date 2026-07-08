@@ -1,0 +1,12 @@
+{
+  "$schema": "https://developer.microsoft.com/json-schemas/fabric/gitIntegration/platformProperties/2.0.0/schema.json",
+  "metadata": {
+    "type": "Notebook",
+    "displayName": "02_optimizing-tables_sql",
+    "description": "Spark SQL track of Module 2: fix Delta table layout problems (compaction, optimize write, clustering, deletion vectors, data-skipping stats) using spark.sql() instead of the DataFrame API. Same exercises and benchmarks, expressed in SQL."
+  },
+  "config": {
+    "version": "2.0",
+    "logicalId": "187ee249-ed27-4025-a711-9ff5112bbcce"
+  }
+}
