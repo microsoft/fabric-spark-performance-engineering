@@ -631,7 +631,7 @@ union_branches = [
 ]
 sql_onepass_before = "\nUNION ALL\n".join(union_branches)
 
-with benchmark_op("One pass, not many", "before", spark):
+with benchmark_op("One pass, not many", "many scans", spark):
     onepass_before_df = spark.sql(sql_onepass_before)
     onepass_before = {r["transaction_type"]: (r["txns"], int(r["total_qty"] or 0)) for r in onepass_before_df.collect()}
 print("Buckets returned:", len(onepass_before))
@@ -699,7 +699,7 @@ print("Scans in starter plan:", count_table_scans(spark.sql(f"SELECT * FROM {tab
 # ==================================================================================================
 
 # One GROUP BY scans the table once and produces all category totals together.
-with benchmark_op("One pass, not many", "after", spark):
+with benchmark_op("One pass, not many", "one scan", spark):
     onepass_after_df = spark.sql(f"""
         SELECT transaction_type, COUNT(*) AS txns, SUM(CAST(quantity AS INT)) AS total_qty
         FROM {table_ref('inventory_transaction')}
@@ -850,7 +850,7 @@ print(json.dumps(cartesian_before_evidence, default=str, indent=2))
 result_cartesian_before.explain(mode="formatted")
 
 starter_preview = spark.sql(f"""
-    SELECT qi.production_order_id, po.production_order_id, po.machine_id, qi.pass_count, qi.sample_size
+    SELECT po.production_order_id, po.machine_id, qi.pass_count, qi.sample_size
     FROM {table_ref('quality_inspection')} qi
     JOIN {table_ref('production_order')} po ON qi.production_order_id = po.production_order_id
     LIMIT 5
@@ -979,7 +979,7 @@ def python_extract_day(timestamp_str):
 spark.udf.register("python_line_total", python_line_total, DoubleType())
 spark.udf.register("python_extract_day", python_extract_day, "string")
 
-with benchmark_op("Python UDF vs native", "before", spark):
+with benchmark_op("Python UDFs vs Native Functions", "Python UDF", spark):
     udf_before_df = spark.sql(f"""
         SELECT customer_id,
                SUM(python_line_total(line.quantity, line.unit_price, line.extended_price)) AS total_spend,
@@ -1061,7 +1061,7 @@ spark.sql(f"""
 # ==================================================================================================
 
 # Native SQL keeps execution inside Spark — no JVM↔Python round-trip.
-with benchmark_op("Python UDF vs native", "after", spark):
+with benchmark_op("Python UDFs vs Native Functions", "Native Functions", spark):
     native_after_df = spark.sql(f"""
         SELECT customer_id,
                SUM(COALESCE(CAST(line.extended_price AS DOUBLE),
@@ -1216,9 +1216,8 @@ with benchmark_op("Schema Inference", "inferred (file scan)", spark):
         OPTIONS (path '{landing_path}', multiline 'true')
     """)
     # Force schema resolution to complete inside the timed block.
-    spark.sql("SELECT * FROM landing_inferred LIMIT 0").collect()
-
-spark.sql("DESCRIBE landing_inferred").show(truncate=False)
+    inferred_schema_json = spark.sql("SELECT * FROM landing_inferred")
+    inferred_schema_json.printSchema()
 
 # METADATA ********************
 
@@ -1252,9 +1251,8 @@ with benchmark_op("Schema Inference", "static (no scan)", spark):
         USING json
         OPTIONS (path '{landing_path}', multiline 'true')
     """)
-    spark.sql("SELECT * FROM landing_declared LIMIT 0").collect()
-
-spark.sql("DESCRIBE landing_declared").show(truncate=False)
+    static_schema_df = spark.sql("SELECT * FROM landing_declared")
+    static_schema_df.printSchema()
 
 # METADATA ********************
 
@@ -1301,12 +1299,12 @@ print(f"About to collect {TABLE_METRICS['inventory_transaction']['rows']:,} inve
 print("spark.driver.maxResultSize =", spark.conf.get("spark.driver.maxResultSize"))
 
 start = time.time()
-with benchmark_op("Driver Collect", "before", spark):
+with benchmark_op("Driver Collect vs Keeping Data Distributed", "Driver Collect", spark):
     collected_inventory = spark.sql(
         f"SELECT line_id, part_num, quantity, transaction_type FROM {table_ref('inventory_transaction')}"
     ).collect()
 
-with benchmark_op("Driver Python Aggregation", "before", spark):
+with benchmark_op("Driver Python Aggregation", "Driver", spark):
     inventory_by_line = defaultdict(int)
     for row in collected_inventory:
         qty = int(row["quantity"] or 0)
@@ -1367,11 +1365,11 @@ print(json.dumps(driver_before_evidence, default=str, indent=2))
 # Spark computes net inventory by line before the driver receives the display result.
 print("✅ Running fixed query with distributed aggregation...\n")
 
-with benchmark_op("Driver Collect", "after", spark):
+with benchmark_op("Driver Collect vs Keeping Data Distributed", "Driver Collect", spark):
     spark.sql(f"SELECT line_id, part_num, quantity, transaction_type FROM {table_ref('inventory_transaction')}") \
         .write.format("noop").mode("overwrite").save()
 
-with benchmark_op("Driver Python Aggregation", "after", spark):
+with benchmark_op("Aggregations - Driver vs Distributed", "Distributed", spark):
     result_driver_after = spark.sql(f"""
         SELECT line_id,
                SUM(CASE WHEN transaction_type IN ('CONSUMPTION', 'ORDER_PICK', 'SCRAP')
@@ -1470,3 +1468,4 @@ print_benchmark_summary()
 # 1. **Driver `collect()` / OOM** — kept the aggregation in SQL and returned only the small result to the driver.
 # 
 # Carry the same workflow into the next modules: benchmark the symptom, inspect the Spark UI and physical plan, check Delta metadata, change the right lever, and validate the before/after result.
+

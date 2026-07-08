@@ -441,8 +441,11 @@ print(f"🐌 Appending {BATCH_ROWS:,} rows WITHOUT optimize write (repartitioned
 spark.sql(f"""
     INSERT INTO {FAST_SCHEMA}.inventory_transaction
     SELECT /*+ REPARTITION(8) */ *
-    FROM {FAST_SCHEMA}.inventory_transaction
-    LIMIT {BATCH_ROWS}
+    FROM (
+        SELECT *
+        FROM {FAST_SCHEMA}.inventory_transaction
+        LIMIT {BATCH_ROWS}
+    ) s
 """)
 
 files_after_bad = get_table_metrics(f"{FAST_SCHEMA}.inventory_transaction")["num_files"]
@@ -522,8 +525,11 @@ print(f"🚀 Appending {BATCH_ROWS:,} rows WITH optimize write (same repartition
 spark.sql(f"""
     INSERT INTO {FAST_SCHEMA}.inventory_transaction
     SELECT /*+ REPARTITION(8) */ *
-    FROM {FAST_SCHEMA}.inventory_transaction
-    LIMIT {BATCH_ROWS}
+    FROM (
+        SELECT *
+        FROM {FAST_SCHEMA}.inventory_transaction
+        LIMIT {BATCH_ROWS}
+    ) s
 """)
 
 files_after_good = get_table_metrics(f"{FAST_SCHEMA}.inventory_transaction")["num_files"]
