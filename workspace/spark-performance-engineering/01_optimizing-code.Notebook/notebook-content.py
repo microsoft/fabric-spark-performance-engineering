@@ -614,7 +614,7 @@ parts = [
 ]
 onepass_before_df = reduce(lambda a, b: a.unionByName(b), parts)
 
-with benchmark_op("One pass, not many", "before", spark):
+with benchmark_op("One pass, not many", "many scans", spark):
     onepass_before = {r["transaction_type"]: (r["txns"], int(r["total_qty"] or 0)) for r in onepass_before_df.collect()}
 print("Buckets returned:", len(onepass_before))
 
@@ -678,7 +678,7 @@ onepass_after_df = (
     .agg(F.count("*").alias("txns"), F.sum("quantity").alias("total_qty"))
 )
 
-with benchmark_op("One pass, not many", "after", spark):
+with benchmark_op("One pass, not many", "one scan", spark):
     onepass_after = {r["transaction_type"]: (r["txns"], int(r["total_qty"] or 0)) for r in onepass_after_df.collect()}
 print("Buckets returned:", len(onepass_after))
 
@@ -773,7 +773,7 @@ po = spark.table(table_ref("production_order")).select(
 estimated_pairs = TABLE_METRICS["quality_inspection"]["rows"] * TABLE_METRICS["production_order"]["rows"]
 print(f"Estimated Cartesian pairs: {estimated_pairs:,}")
 
-with benchmark_op("Cartesian Join", "before", spark):
+with benchmark_op("Avoid Cartesian Join", "before", spark):
     result_cartesian_before = (
         qi.crossJoin(po)
         .groupBy("machine_id")
@@ -865,9 +865,9 @@ result_cartesian_before # TODO: review the query plan
 # The fixed query joins inspections to production orders by the real key.
 print("✅ Running fixed query with the correct join predicate...\n")
 
-with benchmark_op("Cartesian Join", "after", spark):
+with benchmark_op("AvoidCartesian Join", "after", spark):
     result_cartesian_after = (
-        qi.join(po, join_condition)
+        qi.join(po, F.col("qi_production_order_id") == F.col("po_production_order_id"))
         .groupBy("machine_id")
         .agg(
             F.count("*").alias("joined_rows"),
@@ -976,7 +976,7 @@ exploded_orders8 = orders8.select(
     F.explode("order_lines").alias("line"),
 )
 
-with benchmark_op("Python UDF vs native", "before", spark):
+with benchmark_op("Python UDFs vs Native Functions", "Python UDF", spark):
     udf_before_df = (
         exploded_orders8
         .withColumn("line_total", python_line_total("line.quantity", "line.unit_price", "line.extended_price"))
@@ -1062,7 +1062,7 @@ line_total_native = F.coalesce(
 )
 order_day_native = F.regexp_extract("order_date", r"(\d{4}-\d{2}-\d{2})", 1)
 
-with benchmark_op("Python UDF vs native", "after", spark):
+with benchmark_op("Python UDFs vs Native Functions", "Native Functions", spark):
     native_after_df = (
         exploded_orders8
         .withColumn("line_total", line_total_native)
@@ -1145,7 +1145,7 @@ events_wc = spark.table(table_ref("manufacturing_event")).select(
 )
 N_FEATURES = 100
 
-with benchmark_op("withColumn vs withColumns", "before", spark):
+with benchmark_op("withColumn() vs withColumns()", "withColumn()", spark):
     wc_before_df = events_wc
     for i in range(N_FEATURES):
         wc_before_df = wc_before_df.withColumn(f"feat_{i}", F.col("cycle_time_ms") + F.lit(i))
@@ -1231,7 +1231,7 @@ display(wc_starter_df.limit(5))
 # ==================================================================================================
 
 # One withColumns() adds every column in a single projection.
-with benchmark_op("withColumn vs withColumns", "after", spark):
+with benchmark_op("withColumn() vs withColumns()", "withColumns()", spark):
     feature_exprs = {f"feat_{i}": F.col("cycle_time_ms") + F.lit(i) for i in range(N_FEATURES)}
     wc_after_df = events_wc.withColumns(feature_exprs)
     wc_after_count = wc_after_df.count()
@@ -1310,7 +1310,7 @@ landing_path = f"Files/landing/{LANDING_TABLE}"
 print(f"🐌 Inferring schema from landing zone: {landing_path}\n")
 print("   Spark must open files and read metadata to discover columns + types...\n")
 
-with benchmark_op("Schema Inference", "inferred (file scan)", spark):
+with benchmark_op("Avoid Schema Inference in Production", "inferred (file scan)", spark):
     inferred_df = spark.read.option("multiline", "true").json(landing_path)
 
 inferred_df.printSchema()
@@ -1344,7 +1344,7 @@ static_schema = StructType([
     StructField("BatchId", StringType()),
 ])
 
-with benchmark_op("Schema Inference", "static (no scan)", spark):
+with benchmark_op("Avoid Schema Inference in Production", "static (no scan)", spark):
     static_df = spark.read.schema(static_schema).json(landing_path)
 
 static_df.printSchema()
@@ -1400,10 +1400,11 @@ print(f"About to collect {TABLE_METRICS['inventory_transaction']['rows']:,} inve
 print("spark.driver.maxResultSize =", spark.conf.get("spark.driver.maxResultSize"))
 
 start = time.time()
-with benchmark_op("Driver Collect", "before", spark):
+with benchmark_op("Driver Collect vs Keeping Data Distributed", "Keeping Data Distributed", spark):
     collected_inventory = inv.collect()
 
-with benchmark_op("Driver Python Aggregation", "before", spark):
+with benchmark_op("Aggregations - Driver vs Distributed", "Driver", spark):
+    collected_inventory = inv.collect()
     inventory_by_line = defaultdict(int)
     for row in collected_inventory:
         qty = int(row["quantity"] or 0)
@@ -1458,10 +1459,10 @@ print(json.dumps(driver_before_evidence, default=str, indent=2))
 # Spark computes net inventory by line before the driver receives the display result.
 print("✅ Running fixed query with distributed aggregation...\n")
 
-with benchmark_op("Driver Collect", "after", spark):
+with benchmark_op("Driver Collect vs Keeping Data Distributed", "Keeping Data Distributed", spark):
     inv.write.format("noop").mode("overwrite").save()
 
-with benchmark_op("Driver Python Aggregation", "after", spark):
+with benchmark_op("Aggregations - Driver vs Distributed", "Distributed", spark):
     starter_signed_inventory = inv.withColumn(
         "signed_quantity",
         F.when(
