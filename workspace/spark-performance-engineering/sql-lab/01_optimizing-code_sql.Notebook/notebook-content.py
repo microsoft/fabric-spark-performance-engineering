@@ -26,13 +26,13 @@
 
 # MARKDOWN ********************
 
-# # Module 1 — Optimizing Code (Spark SQL track)
+# # **Module 1 — Optimizing Code (Spark SQL track)**
 # 
 # Welcome to the first Fabric Jumpstart Spark performance lab for **Toy Brick Manufacturing**.
 # 
 # > 🔀 **This is the Spark SQL track.** Every exercise expresses the query with `spark.sql("...")` instead of the DataFrame API. If you prefer the fluent DataFrame API, use `dataframe-notebooks/01_optimizing-code` instead — the concepts, data, and benchmarks are identical.
 # 
-# ## What this module teaches
+# ## **What this module teaches**
 # 
 # This module teaches you to recognize and fix **code-level** anti-patterns: the table design and cluster are fine, but the query as written is wrong or wasteful. You will also start using the diagnostic toolkit that Modules 2 and 3 reuse: Spark UI, `EXPLAIN` / physical plans, Delta metadata from `DESCRIBE DETAIL` / `DESCRIBE HISTORY`, and `inputFiles()`.
 # 
@@ -40,7 +40,7 @@
 
 # MARKDOWN ********************
 
-# ## Exercise summary
+# ## **Exercise summary**
 # 
 # | Exercise | Scenario | Expected performance signal |
 # |---|---|---|
@@ -106,7 +106,7 @@ print(json.dumps(TABLE_METRICS, default=str, indent=2))
 
 # ---
 # 
-# ## Exercise 1 — Predicate pushdown
+# ## **Exercise 1 — Predicate pushdown**
 # 
 # **Problem:** The daily defect-rate query wraps the timestamp in `SUBSTRING(...)` before filtering. That derived expression can't be pushed into the scan, so Spark reads more of `manufacturing_event` than the dashboard needs.
 # 
@@ -127,22 +127,20 @@ latest_day = spark.sql(
     f"SELECT MAX(TO_DATE(timestamp)) AS d FROM {table_ref('manufacturing_event')}"
 ).collect()[0]["d"]
 
-sql_predicate_before = f"""
-    SELECT event_day, machine_id,
-           COUNT(*) AS events,
-           SUM(CAST(defect_detected AS INT)) AS defects,
-           SUM(CAST(defect_detected AS INT)) / COUNT(*) AS defect_rate
-    FROM (
-        SELECT *, SUBSTRING(timestamp, 1, 10) AS event_day
-        FROM {table_ref('manufacturing_event')}
-    )
-    WHERE event_day = '{latest_day}'
-    GROUP BY event_day, machine_id
-    ORDER BY defect_rate DESC
-"""
-
 with benchmark_op("Predicate Pushdown", "before", spark):
-    result_predicate_before = spark.sql(sql_predicate_before)
+    result_predicate_before = spark.sql(f"""
+        SELECT event_day, machine_id,
+               COUNT(*) AS events,
+               SUM(CAST(defect_detected AS INT)) AS defects,
+               SUM(CAST(defect_detected AS INT)) / COUNT(*) AS defect_rate
+        FROM (
+            SELECT *, SUBSTRING(timestamp, 1, 10) AS event_day
+            FROM {table_ref('manufacturing_event')}
+        )
+        WHERE event_day = '{latest_day}'
+        GROUP BY event_day, machine_id
+        ORDER BY defect_rate DESC
+    """)
     display(result_predicate_before)
 
 # METADATA ********************
@@ -181,7 +179,7 @@ print(json.dumps(predicate_before_evidence, default=str, indent=2))
 
 # MARKDOWN ********************
 
-# ### 🎯 Challenge: Check the Spark Plan and Spark UI to diagnose the problem
+# ### 🎯 **Challenge: Check the Spark Plan and Spark UI to diagnose the problem**
 # 
 # You've seen that the query is slow, and you suspect it's because of the large number of files and the filter not being pushed down. You want to confirm this by checking the Spark Plan and the Spark UI.
 # 
@@ -194,7 +192,7 @@ print(json.dumps(predicate_before_evidence, default=str, indent=2))
 # CELL ********************
 
 # Starter: inspect the baseline physical plan.
-spark.sql(f"EXPLAIN FORMATTED {sql_predicate_before}").show(truncate=False)
+result_predicate_before.explain(mode="formatted")
 
 # METADATA ********************
 
@@ -212,19 +210,17 @@ spark.sql(f"EXPLAIN FORMATTED {sql_predicate_before}").show(truncate=False)
 # The fixed query applies the date predicate on the raw column, then derives presentation columns.
 print("✅ Running fixed predicate-pushdown query...\n")
 
-sql_predicate_after = f"""
-    SELECT TO_DATE(timestamp) AS event_day, machine_id,
-           COUNT(*) AS events,
-           SUM(CAST(defect_detected AS INT)) AS defects,
-           SUM(CAST(defect_detected AS INT)) / COUNT(*) AS defect_rate
-    FROM {table_ref('manufacturing_event')}
-    WHERE timestamp LIKE '{latest_day}%'   -- filter on the raw column first (pushes down as StartsWith)
-    GROUP BY TO_DATE(timestamp), machine_id
-    ORDER BY defect_rate DESC
-"""
-
 with benchmark_op("Predicate Pushdown", "after", spark):
-    result_predicate_after = spark.sql(sql_predicate_after)
+    result_predicate_after = spark.sql(f"""
+        SELECT TO_DATE(timestamp) AS event_day, machine_id,
+               COUNT(*) AS events,
+               SUM(CAST(defect_detected AS INT)) AS defects,
+               SUM(CAST(defect_detected AS INT)) / COUNT(*) AS defect_rate
+        FROM {table_ref('manufacturing_event')}
+        WHERE timestamp LIKE '{latest_day}%'   -- filter on the raw column first (pushes down as StartsWith)
+        GROUP BY TO_DATE(timestamp), machine_id
+        ORDER BY defect_rate DESC
+    """)
     display(result_predicate_after)
 
 # METADATA ********************
@@ -264,7 +260,7 @@ record_result("1 predicate pushdown", "after", {
 
 # CELL ********************
 
-spark.sql(f"EXPLAIN FORMATTED {sql_predicate_after}").show(truncate=False)
+result_predicate_after.explain(mode="formatted")
 
 # METADATA ********************
 
@@ -275,7 +271,7 @@ spark.sql(f"EXPLAIN FORMATTED {sql_predicate_after}").show(truncate=False)
 
 # MARKDOWN ********************
 
-# ### 💡 What Just Happened?
+# ### 💡 *What Just Happened?*
 # 
 # Filtering on the **raw** `timestamp` column let Delta push the predicate into the file scan — notice `PushedFilters` now appears in the `DefaultDeltaScanTransformer` node. `WHERE timestamp LIKE 'day%'` pushes down as a `StartsWith` filter, so Spark uses each file's min/max statistics to **skip files** that can't contain the target day.
 # 
@@ -289,7 +285,7 @@ spark.sql(f"EXPLAIN FORMATTED {sql_predicate_after}").show(truncate=False)
 
 # ---
 # 
-# ## Exercise 2 — De-duplicate on the key, not the whole row
+# ## **Exercise 2 — De-duplicate on the key, not the whole row**
 # 
 # **Problem:** A "distinct orders" step runs `SELECT DISTINCT *`, so Spark uses every column as the de-duplication key — including the nested `order_lines` array.
 # 
@@ -304,10 +300,8 @@ spark.sql(f"EXPLAIN FORMATTED {sql_predicate_after}").show(truncate=False)
 # ============================================================
 
 # Baseline: DISTINCT * must aggregate every column, including order_lines.
-sql_proj_before = f"SELECT DISTINCT * FROM {table_ref('web_order')}"
-
 with benchmark_op("Column pruning / projection", "before", spark):
-    proj_before_df = spark.sql(sql_proj_before)
+    proj_before_df = spark.sql(f"SELECT DISTINCT * FROM {table_ref('web_order')}")
     proj_before_count = proj_before_df.count()
 
 print("Distinct full rows:", proj_before_count)
@@ -348,15 +342,15 @@ proj_before_df.explain(mode="formatted")
 
 # MARKDOWN ********************
 
-# ### 🎯 Challenge
+# ### 🎯 **Challenge**
 # 
 # You only need distinct `customer_id` / `order_date` pairs. Rewrite the query so Spark reads and shuffles just those columns — `SELECT DISTINCT customer_id, order_date`. Compare the scanned columns and the plan.
 
 # CELL ********************
 
 # Starter: reduce the columns that reach the shuffle, then de-duplicate.
-sql_proj_starter = f"SELECT DISTINCT * FROM {table_ref('web_order')}"  # TODO: select only the key columns
-proj_starter_df = spark.sql(sql_proj_starter)
+# TODO: select only the key columns
+proj_starter_df = spark.sql(f"SELECT DISTINCT * FROM {table_ref('web_order')}")
 print("Columns shuffled:", len(proj_starter_df.columns))
 
 # METADATA ********************
@@ -373,10 +367,8 @@ print("Columns shuffled:", len(proj_starter_df.columns))
 # ==================================================================================================
 
 # Selecting the business key first prunes the scan and shrinks the exchange.
-sql_proj_after = f"SELECT DISTINCT customer_id, order_date FROM {table_ref('web_order')}"
-
 with benchmark_op("Column pruning / projection", "after", spark):
-    proj_after_df = spark.sql(sql_proj_after)
+    proj_after_df = spark.sql(f"SELECT DISTINCT customer_id, order_date FROM {table_ref('web_order')}")
     proj_after_count = proj_after_df.count()
 
 print("Distinct key rows:", proj_after_count)
@@ -427,7 +419,7 @@ proj_after_df.explain(mode="formatted")
 
 # MARKDOWN ********************
 
-# ### 💡 What Just Happened?
+# ### 💡 *What Just Happened?*
 # 
 # `SELECT DISTINCT *` uses **every** column as the de-duplication key. Spark therefore scans the full row schema and shuffles all of it — including the nested `order_lines` array — through a `HashAggregate`, even though the business key is just `customer_id` + `order_date`.
 # 
@@ -439,7 +431,7 @@ proj_after_df.explain(mode="formatted")
 
 # MARKDOWN ********************
 
-# ## Exercise 3 — Prune columns before a window / row_number
+# ## **Exercise 3 — Prune columns before a window / row_number**
 # 
 # **Problem:** A "latest order per customer" step runs `ROW_NUMBER()` over `SELECT *`. The window has to shuffle (Exchange) and sort every column — including the nested `order_lines` array — even though only a few fields are needed.
 # 
@@ -454,15 +446,14 @@ proj_after_df.explain(mode="formatted")
 # ============================================================
 
 # Baseline: ROW_NUMBER() over the wide, nested row — every column rides through the window.
-sql_latest_before = f"""
+latest_before = spark.sql(f"""
     SELECT * FROM (
         SELECT *,
                ROW_NUMBER() OVER (PARTITION BY customer_id ORDER BY order_date DESC) AS rn
         FROM {table_ref('web_order')}
     )
     WHERE rn = 1
-"""
-latest_before = spark.sql(sql_latest_before)
+""")
 
 # noop sink forces full execution (window shuffle + sort) without pulling rows to the driver.
 with benchmark_op("Prune before window", "before", spark):
@@ -501,22 +492,22 @@ latest_before.explain(mode="formatted")
 
 # MARKDOWN ********************
 
-# ### 🎯 Challenge
+# ### 🎯 **Challenge**
 # 
 # You only need `customer_id`, `order_date`, and `order_total` to pick the latest order. Select those columns *inside* the subquery before the `ROW_NUMBER()` window so the Exchange and Sort move a narrow row and `order_lines` never enters the shuffle. Confirm the latest-row result is unchanged.
 
 # CELL ********************
 
 # Starter: project the columns the window needs INSIDE the subquery.
-sql_latest_starter = f"""
+latest_starter = spark.sql(f"""
     SELECT * FROM (
         SELECT *,   -- TODO: select only customer_id, order_date, order_total
                ROW_NUMBER() OVER (PARTITION BY customer_id ORDER BY order_date DESC) AS rn
         FROM {table_ref('web_order')}
     )
     WHERE rn = 1
-"""
-print("Columns that would enter the window:", len(spark.sql(sql_latest_starter).columns))
+""")
+print("Columns that would enter the window:", len(latest_starter.columns))
 
 # METADATA ********************
 
@@ -532,15 +523,14 @@ print("Columns that would enter the window:", len(spark.sql(sql_latest_starter).
 # ==================================================================================================
 
 # Selecting first keeps order_lines out of the Exchange and Sort.
-sql_latest_after = f"""
+latest_after = spark.sql(f"""
     SELECT customer_id, order_date, order_total, rn FROM (
         SELECT customer_id, order_date, order_total,
                ROW_NUMBER() OVER (PARTITION BY customer_id ORDER BY order_date DESC) AS rn
         FROM {table_ref('web_order')}
     )
     WHERE rn = 1
-"""
-latest_after = spark.sql(sql_latest_after)
+""")
 
 with benchmark_op("Prune before window", "after", spark):
     latest_after.write.format("noop").mode("overwrite").save()
@@ -599,7 +589,7 @@ latest_after.explain(mode="formatted")
 
 # MARKDOWN ********************
 
-# ### 💡 What Just Happened?
+# ### 💡 *What Just Happened?*
 # 
 # A window with `PARTITION BY` / `ORDER BY` forces an **Exchange (shuffle) + Sort**. Whatever columns are in the subquery's `SELECT` ride through that shuffle and sort — so the baseline's `SELECT *` carried the entire wide row, including the nested `order_lines` array, just to pick the latest order per customer.
 # 
@@ -613,7 +603,7 @@ latest_after.explain(mode="formatted")
 
 # ---
 # 
-# ## Exercise 4 — One pass, not many (avoid repeated scans)
+# ## **Exercise 4 — One pass, not many (avoid repeated scans)**
 # 
 # **Problem:** A per-transaction-type report is built by `UNION ALL`-ing one filtered aggregation per `transaction_type` — so the table is scanned once per category.
 # 
@@ -685,15 +675,15 @@ onepass_before_df.explain(mode="formatted")
 
 # MARKDOWN ********************
 
-# ### 🎯 Challenge
+# ### 🎯 **Challenge**
 # 
 # Produce the same per-type totals with a single pass over `inventory_transaction`. Use one `GROUP BY transaction_type` aggregation so the plan contains a single scan, and confirm the totals match the `UNION ALL` version.
 
 # CELL ********************
 
 # Starter: compute every bucket in one pass instead of one query per type.
-sql_onepass_starter = f"SELECT * FROM {table_ref('inventory_transaction')}"  # TODO: GROUP BY transaction_type
-print("Scans in starter plan:", count_table_scans(spark.sql(sql_onepass_starter)))
+# TODO: GROUP BY transaction_type
+print("Scans in starter plan:", count_table_scans(spark.sql(f"SELECT * FROM {table_ref('inventory_transaction')}")))
 
 # METADATA ********************
 
@@ -709,14 +699,12 @@ print("Scans in starter plan:", count_table_scans(spark.sql(sql_onepass_starter)
 # ==================================================================================================
 
 # One GROUP BY scans the table once and produces all category totals together.
-sql_onepass_after = f"""
-    SELECT transaction_type, COUNT(*) AS txns, SUM(CAST(quantity AS INT)) AS total_qty
-    FROM {table_ref('inventory_transaction')}
-    GROUP BY transaction_type
-"""
-
 with benchmark_op("One pass, not many", "after", spark):
-    onepass_after_df = spark.sql(sql_onepass_after)
+    onepass_after_df = spark.sql(f"""
+        SELECT transaction_type, COUNT(*) AS txns, SUM(CAST(quantity AS INT)) AS total_qty
+        FROM {table_ref('inventory_transaction')}
+        GROUP BY transaction_type
+    """)
     onepass_after = {r["transaction_type"]: (r["txns"], int(r["total_qty"] or 0)) for r in onepass_after_df.collect()}
 print("Buckets returned:", len(onepass_after))
 
@@ -767,7 +755,7 @@ onepass_after_df.explain(mode="formatted")
 
 # MARKDOWN ********************
 
-# ### 💡 What Just Happened?
+# ### 💡 *What Just Happened?*
 # 
 # Spark does **not** merge independent filtered passes into a single read. `UNION ALL`-ing one filtered aggregation per `transaction_type` produced one `FileScan` of `inventory_transaction` **per category**, so the work grew linearly with the number of types.
 # 
@@ -781,7 +769,7 @@ onepass_after_df.explain(mode="formatted")
 
 # ---
 # 
-# ## Exercise 5 — Cartesian / missing join key
+# ## **Exercise 5 — Cartesian / missing join key**
 # 
 # **Problem:** A pass-rate query combines `quality_inspection` with `production_order` using a `CROSS JOIN` — it omits the production-order join key.
 # 
@@ -801,18 +789,16 @@ print("🐌 Running baseline query with missing join key...\n")
 estimated_pairs = TABLE_METRICS["quality_inspection"]["rows"] * TABLE_METRICS["production_order"]["rows"]
 print(f"Estimated Cartesian pairs: {estimated_pairs:,}")
 
-sql_cartesian_before = f"""
-    SELECT po.machine_id,
-           COUNT(*) AS joined_rows,
-           SUM(qi.pass_count) / SUM(qi.sample_size) AS pass_rate
-    FROM {table_ref('quality_inspection')} qi
-    CROSS JOIN {table_ref('production_order')} po
-    GROUP BY po.machine_id
-    ORDER BY joined_rows DESC
-"""
-
 with benchmark_op("Cartesian Join", "before", spark):
-    result_cartesian_before = spark.sql(sql_cartesian_before)
+    result_cartesian_before = spark.sql(f"""
+        SELECT po.machine_id,
+               COUNT(*) AS joined_rows,
+               SUM(qi.pass_count) / SUM(qi.sample_size) AS pass_rate
+        FROM {table_ref('quality_inspection')} qi
+        CROSS JOIN {table_ref('production_order')} po
+        GROUP BY po.machine_id
+        ORDER BY joined_rows DESC
+    """)
     display(result_cartesian_before)
 
 # METADATA ********************
@@ -854,7 +840,7 @@ print(json.dumps(cartesian_before_evidence, default=str, indent=2))
 
 # MARKDOWN ********************
 
-# ### 🎯 Challenge
+# ### 🎯 **Challenge**
 # 
 # Inspect the plan for `CartesianProduct` or `BroadcastNestedLoopJoin`. Then rewrite the pass-rate query with the real key, `production_order_id`, so Spark can use an equi-join (`JOIN ... ON qi.production_order_id = po.production_order_id`).
 
@@ -887,19 +873,17 @@ display(starter_preview)
 # The fixed query joins inspections to production orders by the real key.
 print("✅ Running fixed query with the correct join predicate...\n")
 
-sql_cartesian_after = f"""
-    SELECT po.machine_id,
-           COUNT(*) AS joined_rows,
-           SUM(qi.pass_count) / SUM(qi.sample_size) AS pass_rate
-    FROM {table_ref('quality_inspection')} qi
-    JOIN {table_ref('production_order')} po
-      ON qi.production_order_id = po.production_order_id
-    GROUP BY po.machine_id
-    ORDER BY joined_rows DESC
-"""
-
 with benchmark_op("Cartesian Join", "after", spark):
-    result_cartesian_after = spark.sql(sql_cartesian_after)
+    result_cartesian_after = spark.sql(f"""
+        SELECT po.machine_id,
+               COUNT(*) AS joined_rows,
+               SUM(qi.pass_count) / SUM(qi.sample_size) AS pass_rate
+        FROM {table_ref('quality_inspection')} qi
+        JOIN {table_ref('production_order')} po
+          ON qi.production_order_id = po.production_order_id
+        GROUP BY po.machine_id
+        ORDER BY joined_rows DESC
+    """)
     display(result_cartesian_after)
 
 # METADATA ********************
@@ -941,7 +925,7 @@ result_cartesian_after.explain(mode="formatted")
 
 # MARKDOWN ********************
 
-# ### 💡 What Just Happened?
+# ### 💡 *What Just Happened?*
 # 
 # Without an equality predicate, `CROSS JOIN` pairs **every** left row with **every** right row — N × M pairs — which the plan exposes as `CartesianProduct` or `BroadcastNestedLoopJoin`. On real data this is where you see runaway shuffle, spill, executor loss, and OOM.
 # 
@@ -955,7 +939,7 @@ result_cartesian_after.explain(mode="formatted")
 
 # ---
 # 
-# ## Exercise 6 — Python UDFs → native SQL functions
+# ## **Exercise 6 — Python UDFs → native SQL functions**
 # 
 # **Problem:** A top-customer spend query computes line totals and order days with scalar Python UDFs registered for SQL (`spark.udf.register`).
 # 
@@ -995,22 +979,20 @@ def python_extract_day(timestamp_str):
 spark.udf.register("python_line_total", python_line_total, DoubleType())
 spark.udf.register("python_extract_day", python_extract_day, "string")
 
-sql_udf_before = f"""
-    SELECT customer_id,
-           SUM(python_line_total(line.quantity, line.unit_price, line.extended_price)) AS total_spend,
-           MAX(python_extract_day(order_date)) AS latest_day,
-           COUNT(*) AS line_count
-    FROM (
-        SELECT customer_id, order_date, EXPLODE(order_lines) AS line
-        FROM {table_ref('web_order')}
-    )
-    GROUP BY customer_id
-    ORDER BY total_spend DESC
-    LIMIT 10
-"""
-
 with benchmark_op("Python UDF vs native", "before", spark):
-    udf_before_df = spark.sql(sql_udf_before)
+    udf_before_df = spark.sql(f"""
+        SELECT customer_id,
+               SUM(python_line_total(line.quantity, line.unit_price, line.extended_price)) AS total_spend,
+               MAX(python_extract_day(order_date)) AS latest_day,
+               COUNT(*) AS line_count
+        FROM (
+            SELECT customer_id, order_date, EXPLODE(order_lines) AS line
+            FROM {table_ref('web_order')}
+        )
+        GROUP BY customer_id
+        ORDER BY total_spend DESC
+        LIMIT 10
+    """)
     udf_before_pdf = udf_before_df.toPandas()
 
 display(udf_before_pdf)
@@ -1048,7 +1030,7 @@ print(udf_before_plan[:1600])
 
 # MARKDOWN ********************
 
-# ### 🎯 Challenge
+# ### 🎯 **Challenge**
 # 
 # Rewrite both UDFs as native SQL functions — `COALESCE` / arithmetic for the line total and `REGEXP_EXTRACT` for the order day. Re-run and confirm `BatchEvalPython` disappears from the plan.
 
@@ -1079,24 +1061,22 @@ spark.sql(f"""
 # ==================================================================================================
 
 # Native SQL keeps execution inside Spark — no JVM↔Python round-trip.
-sql_udf_after = f"""
-    SELECT customer_id,
-           SUM(COALESCE(CAST(line.extended_price AS DOUBLE),
-                        CAST(line.quantity AS DOUBLE) * CAST(line.unit_price AS DOUBLE),
-                        0.0)) AS total_spend,
-           MAX(REGEXP_EXTRACT(order_date, '([0-9]{{4}}-[0-9]{{2}}-[0-9]{{2}})', 1)) AS latest_day,
-           COUNT(*) AS line_count
-    FROM (
-        SELECT customer_id, order_date, EXPLODE(order_lines) AS line
-        FROM {table_ref('web_order')}
-    )
-    GROUP BY customer_id
-    ORDER BY total_spend DESC
-    LIMIT 10
-"""
-
 with benchmark_op("Python UDF vs native", "after", spark):
-    native_after_df = spark.sql(sql_udf_after)
+    native_after_df = spark.sql(f"""
+        SELECT customer_id,
+               SUM(COALESCE(CAST(line.extended_price AS DOUBLE),
+                            CAST(line.quantity AS DOUBLE) * CAST(line.unit_price AS DOUBLE),
+                            0.0)) AS total_spend,
+               MAX(REGEXP_EXTRACT(order_date, '([0-9]{{4}}-[0-9]{{2}}-[0-9]{{2}})', 1)) AS latest_day,
+               COUNT(*) AS line_count
+        FROM (
+            SELECT customer_id, order_date, EXPLODE(order_lines) AS line
+            FROM {table_ref('web_order')}
+        )
+        GROUP BY customer_id
+        ORDER BY total_spend DESC
+        LIMIT 10
+    """)
     native_after_pdf = native_after_df.toPandas()
 
 display(native_after_pdf)
@@ -1137,7 +1117,7 @@ restore_conf("spark.native.enabled")
 
 # MARKDOWN ********************
 
-# ### 💡 What Just Happened?
+# ### 💡 *What Just Happened?*
 # 
 # On the JVM, a scalar Python UDF forces a **JVM↔Python boundary** — the plan shows `BatchEvalPython` — where every row is serialized to a Python worker and back. That per-row round-trip, plus the loss of whole-stage codegen, is what makes UDFs slow.
 # 
@@ -1151,7 +1131,7 @@ restore_conf("spark.native.enabled")
 
 # ---
 # 
-# ## Exercise 7 — Projection shape: why SQL avoids the `withColumn` trap
+# ## **Exercise 7 — Projection shape: why SQL avoids the `withColumn` trap**
 # 
 # **Context:** In the DataFrame API, adding many derived columns by chaining `.withColumn()` in a loop nests one `Project` node per column, building a deep plan that is slow to analyze (see the DataFrame track's Exercise 7).
 # 
@@ -1168,12 +1148,11 @@ N_FEATURES = 100
 feature_cols = ",\n           ".join(
     f"cycle_time_ms + {i} AS feat_{i}" for i in range(N_FEATURES)
 )
-sql_features = f"""
+features_df = spark.sql(f"""
     SELECT machine_id, cycle_time_ms,
            {feature_cols}
     FROM {table_ref('manufacturing_event')}
-"""
-features_df = spark.sql(sql_features)
+""")
 
 # The analyzed plan collapses all 100 derived columns into ONE Project node.
 features_analyzed = features_df._jdf.queryExecution().analyzed().toString()
@@ -1193,7 +1172,7 @@ print(json.dumps({
 
 # MARKDOWN ********************
 
-# ### 💡 What Just Happened?
+# ### 💡 *What Just Happened?*
 # 
 # Each `.withColumn()` call in the DataFrame API adds another nested `Project` and re-resolves the schema on the driver; chaining 100 of them builds a plan with ~100 stacked `Project` nodes that is slow to analyze (and can even `StackOverflow`).
 # 
@@ -1205,7 +1184,7 @@ print(json.dumps({
 
 # MARKDOWN ********************
 
-# ## Exercise 8 — Schema inference vs a declared schema
+# ## **Exercise 8 — Schema inference vs a declared schema**
 # 
 # **Problem:** Creating a temp view over the JSON landing zone without a schema lets Spark **infer** the columns and types. To do that it must open and scan the files *before your query runs* — an eager, hidden startup cost that grows with the number of files.
 # 
@@ -1286,7 +1265,7 @@ spark.sql("DESCRIBE landing_declared").show(truncate=False)
 
 # MARKDOWN ********************
 
-# ### 💡 What Just Happened?
+# ### 💡 *What Just Happened?*
 # 
 # `CREATE TEMPORARY VIEW ... USING json` with no column list makes Spark **infer** the columns and types — and to do that it must open and scan the files *before your query runs*. That is an eager, hidden startup cost that grows with the number of files, so on thousands of small landing-zone files the inference scan can dominate a job that otherwise reads very little.
 # 
@@ -1300,7 +1279,7 @@ spark.sql("DESCRIBE landing_declared").show(truncate=False)
 
 # ---
 # 
-# ## Exercise 9 — Driver `collect()` and driver OOM
+# ## **Exercise 9 — Driver `collect()` and driver OOM**
 # 
 # **Problem:** The inventory workflow pulls every transaction to the driver with `spark.sql(...).collect()` and aggregates in Python.
 # 
@@ -1375,7 +1354,7 @@ print(json.dumps(driver_before_evidence, default=str, indent=2))
 
 # MARKDOWN ********************
 
-# ### 🎯 Challenge
+# ### 🎯 **Challenge**
 # 
 # Rewrite the workflow so executors compute the net inventory by line in SQL. The driver should receive only the grouped result, not every raw transaction row. Use a `SUM(CASE WHEN ...)` to sign the quantity, then `GROUP BY line_id`.
 
@@ -1388,22 +1367,20 @@ print(json.dumps(driver_before_evidence, default=str, indent=2))
 # Spark computes net inventory by line before the driver receives the display result.
 print("✅ Running fixed query with distributed aggregation...\n")
 
-sql_driver_after = f"""
-    SELECT line_id,
-           SUM(CASE WHEN transaction_type IN ('CONSUMPTION', 'ORDER_PICK', 'SCRAP')
-                    THEN -ABS(CAST(quantity AS INT))
-                    ELSE CAST(quantity AS INT) END) AS net_quantity
-    FROM {table_ref('inventory_transaction')}
-    GROUP BY line_id
-    ORDER BY net_quantity DESC
-"""
-
 with benchmark_op("Driver Collect", "after", spark):
     spark.sql(f"SELECT line_id, part_num, quantity, transaction_type FROM {table_ref('inventory_transaction')}") \
         .write.format("noop").mode("overwrite").save()
 
 with benchmark_op("Driver Python Aggregation", "after", spark):
-    result_driver_after = spark.sql(sql_driver_after)
+    result_driver_after = spark.sql(f"""
+        SELECT line_id,
+               SUM(CASE WHEN transaction_type IN ('CONSUMPTION', 'ORDER_PICK', 'SCRAP')
+                        THEN -ABS(CAST(quantity AS INT))
+                        ELSE CAST(quantity AS INT) END) AS net_quantity
+        FROM {table_ref('inventory_transaction')}
+        GROUP BY line_id
+        ORDER BY net_quantity DESC
+    """)
     display(result_driver_after)
 
 # METADATA ********************
@@ -1438,7 +1415,7 @@ result_driver_after.explain(mode="formatted")
 
 # MARKDOWN ********************
 
-# ### 💡 What Just Happened?
+# ### 💡 *What Just Happened?*
 # 
 # `spark.sql(...).collect()` (and `.toPandas()`) pulls **every raw row** into the single driver process. That transfer can trip task-result transport limits, exhaust executor memory while serializing results, or blow past `spark.driver.maxResultSize` — and the aggregation then runs single-threaded in Python instead of across the cluster.
 # 
@@ -1452,7 +1429,7 @@ result_driver_after.explain(mode="formatted")
 
 # ---
 # 
-# # 🏆 Performance Impact by Exercise
+# # 🏆 **Performance Impact by Exercise**
 # 
 # Execute the below to see the full impact across every exercise.
 # 
@@ -1478,7 +1455,7 @@ print_benchmark_summary()
 
 # ---
 # 
-# ## Summary — Optimizing code (Spark SQL)
+# ## **Summary — Optimizing code (Spark SQL)**
 # 
 # You worked through the same code-level Spark anti-patterns as the DataFrame track, each with the same loop: benchmark the symptom, diagnose it in the physical plan, change the SQL, and re-check.
 # 

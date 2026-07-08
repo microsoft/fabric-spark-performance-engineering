@@ -26,19 +26,19 @@
 
 # MARKDOWN ********************
 
-# # Module 3 — Optimizing Execution (Spark SQL track)
+# # **Module 3 — Optimizing Execution (Spark SQL track)**
 # 
 # This module is for Toy Brick Manufacturing Spark workloads where the code is logically correct and the tables are already well-designed, but Spark runs the work sub-optimally because of data distribution or resource choices.
 # 
 # > 🔀 **This is the Spark SQL track.** Every exercise expresses the query with `spark.sql("...")` instead of the DataFrame API. If you prefer the fluent DataFrame API, use `dataframe-notebooks/03_optimizing-execution` instead — the concepts, data, and benchmarks are identical.
 # 
-# ## What this module teaches
+# ## **What this module teaches**
 # 
 # - Fix execution with join strategy, AQE, partition sizing, caching, and native execution choices.
 # - Keep transformation logic and results identical while changing how Spark executes the query.
 # - Use Spark UI stages, physical plans, task skew, and spill metrics to prove the bottleneck.
 # 
-# ## Assumed from prior modules
+# ## **Assumed from prior modules**
 # 
 # - Module 1: diagnostic toolkit, including plans, Spark UI, and task metrics.
 # - Module 2: tables are already well-designed; do not change layout or source data here.
@@ -48,7 +48,7 @@
 
 # MARKDOWN ********************
 
-# ## Exercise summary
+# ## **Exercise summary**
 # 
 # | Exercise | Scenario | Expected performance signal |
 # |---|---|---|
@@ -118,9 +118,9 @@ print(json.dumps({"sourceMetricsSample": SOURCE_METRICS}, indent=2, sort_keys=Tr
 
 # ---
 # 
-# ## Exercise 1 — Join strategies / broadcast
+# ## **Exercise 1 — Join strategies / broadcast**
 # 
-# ### Context and problem
+# ### **Context and problem**
 # 
 # A correct query joins high-volume manufacturing events to small production-order and part reference tables. With automatic broadcast disabled, Spark defaults to sort-merge joins, adding shuffle and sort overhead. The baseline also turns AQE off and runs an untimed warm-up pass, so the measured gap reflects the join strategy on warm data rather than a one-time cold read. Fix only the join strategy with a `/*+ BROADCAST */` hint; the aggregation stays identical.
 
@@ -141,7 +141,7 @@ remember_conf("spark.sql.adaptive.enabled")
 spark.conf.set("spark.sql.autoBroadcastJoinThreshold", "-1")
 spark.conf.set("spark.sql.adaptive.enabled", "false")
 
-sql_q1_before = f"""
+q1_before_df = spark.sql(f"""
     SELECT p.part_material,
            COUNT(*) AS events,
            SUM(CAST(e.defect_detected AS INT)) AS defects,
@@ -151,13 +151,12 @@ sql_q1_before = f"""
     JOIN {table_ref('parts')} p ON e.part_num = p.part_num
     GROUP BY p.part_material
     ORDER BY p.part_material
-"""
+""")
 
 # Warm-up (untimed): prime disk cache + JVM so the timed run is steady-state.
-spark.sql(sql_q1_before).count()
+q1_before_df.count()
 
 with benchmark_op("Join strategy / broadcast", "before", spark):
-    q1_before_df = spark.sql(sql_q1_before)
     q1_before_rows = q1_before_df.collect()
 display(spark.createDataFrame(q1_before_rows))
 
@@ -192,7 +191,7 @@ print(json.dumps({
 
 # MARKDOWN ********************
 
-# ### 🎯 Challenge
+# ### 🎯 **Challenge**
 # 
 # Add a `/*+ BROADCAST(o), BROADCAST(p) */` hint to broadcast the small reference tables (or restore automatic broadcast / AQE), then verify `BroadcastHashJoin` appears in the physical plan.
 
@@ -200,14 +199,15 @@ print(json.dumps({
 # CELL ********************
 
 # Challenge starter: edit the query below to broadcast the small references.
-sql_q1_attempt = f"""
+# TODO: add /*+ BROADCAST(o), BROADCAST(p) */ after SELECT
+q1_attempt_df = spark.sql(f"""
     SELECT p.part_material, COUNT(*) AS events
     FROM {table_ref('manufacturing_event')} e
     JOIN {table_ref('production_order')} o ON e.production_order_id = o.production_order_id
     JOIN {table_ref('parts')} p ON e.part_num = p.part_num
     GROUP BY p.part_material
-"""  # TODO: add /*+ BROADCAST(o), BROADCAST(p) */ after SELECT
-print(explain_string(spark.sql(sql_q1_attempt))[:1200])
+""")
+print(explain_string(q1_attempt_df)[:1200])
 
 # METADATA ********************
 
@@ -226,7 +226,7 @@ print(explain_string(spark.sql(sql_q1_attempt))[:1200])
 set_job("1 solution broadcast join")
 spark.conf.set("spark.sql.adaptive.enabled", "true")
 
-sql_q1_after = f"""
+q1_after_df = spark.sql(f"""
     SELECT /*+ BROADCAST(o), BROADCAST(p) */
            p.part_material,
            COUNT(*) AS events,
@@ -237,13 +237,12 @@ sql_q1_after = f"""
     JOIN {table_ref('parts')} p ON e.part_num = p.part_num
     GROUP BY p.part_material
     ORDER BY p.part_material
-"""
+""")
 
 # Warm-up (untimed) so before/after are measured on equal, warm footing.
-spark.sql(sql_q1_after).count()
+q1_after_df.count()
 
 with benchmark_op("Join strategy / broadcast", "after", spark):
-    q1_after_df = spark.sql(sql_q1_after)
     q1_after_rows = q1_after_df.collect()
 display(spark.createDataFrame(q1_after_rows))
 restore_conf("spark.sql.autoBroadcastJoinThreshold")
@@ -283,7 +282,7 @@ assert valid, "Exercise 1 validation failed"
 
 # MARKDOWN ********************
 
-# ### 💡 What Just Happened?
+# ### 💡 *What Just Happened?*
 # 
 # With automatic broadcast disabled, Spark defaulted to a `SortMergeJoin`: **both** sides are shuffled and sorted on the join key before matching — expensive, and wasteful when one side is tiny. The physical plan confirmed the sort-merge and the extra shuffle stages.
 # 
@@ -297,9 +296,9 @@ assert valid, "Exercise 1 validation failed"
 
 # ---
 # 
-# ## Exercise 2 — Skew handling / AQE skew join
+# ## **Exercise 2 — Skew handling / AQE skew join**
 # 
-# ### Context and problem
+# ### **Context and problem**
 # 
 # A plant throughput rollup joins high-volume manufacturing events to a small machine dimension. One machine ("the busy one") produces orders of magnitude more events than the others — classic data skew on the **join key**. With broadcast disabled the join is a shuffle join, and with AQE skew handling off the hot key lands in a single shuffle partition, so one straggler task dominates the stage. The fix keeps the query identical and lets AQE split the hot partition.
 # 
@@ -363,19 +362,17 @@ spark.conf.set("spark.sql.adaptive.coalescePartitions.enabled", "true")
 spark.conf.set("spark.sql.autoBroadcastJoinThreshold", "-1")
 spark.conf.set("spark.sql.shuffle.partitions", "200")
 
-sql_q2_rollup = f"""
-    SELECT m.plant,
-           COUNT(*) AS events,
-           AVG(e.mold_temp) AS avg_temp,
-           SUM(e.defect_detected) AS defects
-    FROM {table_ref('skewed_events', WORK_SCHEMA)} e
-    JOIN {table_ref('machine_dim', WORK_SCHEMA)} m ON e.machine_id = m.machine_id
-    GROUP BY m.plant
-    ORDER BY m.plant
-"""
-
 with benchmark_op("Skew handling / AQE skew join", "before", spark):
-    q2_before_df = spark.sql(sql_q2_rollup)
+    q2_before_df = spark.sql(f"""
+        SELECT m.plant,
+               COUNT(*) AS events,
+               AVG(e.mold_temp) AS avg_temp,
+               SUM(e.defect_detected) AS defects
+        FROM {table_ref('skewed_events', WORK_SCHEMA)} e
+        JOIN {table_ref('machine_dim', WORK_SCHEMA)} m ON e.machine_id = m.machine_id
+        GROUP BY m.plant
+        ORDER BY m.plant
+    """)
     q2_before_rows = q2_before_df.collect()
 
 display(spark.createDataFrame(q2_before_rows))
@@ -412,7 +409,7 @@ spark.table(table_ref("skewed_events", WORK_SCHEMA)).repartition(200, "machine_i
 
 # MARKDOWN ********************
 
-# ### 🎯 Challenge
+# ### 🎯 **Challenge**
 # 
 # Keep the plant rollup exactly as written. Re-enable `spark.sql.adaptive.skewJoin.enabled` and lower `skewedPartitionThresholdInBytes` / `advisoryPartitionSizeInBytes` so AQE splits the hot partition on this small, highly-compressible lab data. (Manual salting — add `pmod(xxhash64(event_id), N)` to the fact and explode the dimension across the same salts — is the fallback when AQE will not trigger.)
 
@@ -451,7 +448,16 @@ spark.conf.set("spark.sql.adaptive.skewJoin.skewedPartitionThresholdInBytes", "4
 spark.conf.set("spark.sql.adaptive.advisoryPartitionSizeInBytes", "8m")
 
 with benchmark_op("Skew handling / AQE skew join", "after", spark):
-    q2_after_df = spark.sql(sql_q2_rollup)
+    q2_after_df = spark.sql(f"""
+        SELECT m.plant,
+               COUNT(*) AS events,
+               AVG(e.mold_temp) AS avg_temp,
+               SUM(e.defect_detected) AS defects
+        FROM {table_ref('skewed_events', WORK_SCHEMA)} e
+        JOIN {table_ref('machine_dim', WORK_SCHEMA)} m ON e.machine_id = m.machine_id
+        GROUP BY m.plant
+        ORDER BY m.plant
+    """)
     q2_after_rows = q2_after_df.collect()
 
 # Drive the plan from this DataFrame's own action so executedPlan holds the final adaptive plan.
@@ -498,7 +504,7 @@ restore_conf("spark.sql.adaptive.advisoryPartitionSizeInBytes")
 
 # MARKDOWN ********************
 
-# ### 💡 What Just Happened?
+# ### 💡 *What Just Happened?*
 # 
 # One machine dominated the join key, so hashing the key into 200 shuffle partitions dropped all of the hot machine's rows into a **single** partition. That partition's task became a straggler — the whole stage waited on one core while the rest sat idle. The Spark UI Stages view made this obvious: one task's duration dwarfed the others.
 # 
@@ -512,9 +518,9 @@ restore_conf("spark.sql.adaptive.advisoryPartitionSizeInBytes")
 
 # ---
 # 
-# ## Exercise 3 — Shuffle partition sizing (tiny-task storm)
+# ## **Exercise 3 — Shuffle partition sizing (tiny-task storm)**
 # 
-# ### Context and problem
+# ### **Context and problem**
 # 
 # A plant KPI rollup is correct, but someone set `spark.sql.shuffle.partitions` to a large static value "to be safe" and disabled AQE coalescing. On a small result the aggregation produces thousands of nearly-empty shuffle partitions — each paying task-launch overhead — so most of the wall-clock is scheduling, not compute. The fix keeps the query identical and lets AQE coalesce the tiny partitions into right-sized tasks.
 
@@ -531,18 +537,16 @@ remember_conf("spark.sql.adaptive.coalescePartitions.enabled")
 spark.conf.set("spark.sql.shuffle.partitions", "1000")
 spark.conf.set("spark.sql.adaptive.coalescePartitions.enabled", "false")
 
-sql_q3_rollup = f"""
-    SELECT machine_id,
-           COUNT(*) AS events,
-           AVG(cycle_time_ms) AS avg_cycle_ms,
-           SUM(CAST(defect_detected AS INT)) AS defects
-    FROM {table_ref('manufacturing_event')}
-    GROUP BY machine_id
-    ORDER BY events DESC, machine_id
-"""
-
 with benchmark_op("Shuffle partition sizing", "before", spark):
-    q3_before_df = spark.sql(sql_q3_rollup)
+    q3_before_df = spark.sql(f"""
+        SELECT machine_id,
+               COUNT(*) AS events,
+               AVG(cycle_time_ms) AS avg_cycle_ms,
+               SUM(CAST(defect_detected AS INT)) AS defects
+        FROM {table_ref('manufacturing_event')}
+        GROUP BY machine_id
+        ORDER BY events DESC, machine_id
+    """)
     q3_before_rows = q3_before_df.collect()
 
 display(spark.createDataFrame(q3_before_rows).limit(10))
@@ -578,7 +582,7 @@ print(json.dumps({
 
 # MARKDOWN ********************
 
-# ### 🎯 Challenge
+# ### 🎯 **Challenge**
 # 
 # Keep the KPI query exactly as written and change only execution: re-enable `spark.sql.adaptive.coalescePartitions.enabled` so AQE merges the near-empty shuffle partitions into right-sized chunks. No query change is required.
 
@@ -609,7 +613,15 @@ spark.conf.set("spark.sql.adaptive.enabled", "true")
 spark.conf.set("spark.sql.adaptive.coalescePartitions.enabled", "true")
 
 with benchmark_op("Shuffle partition sizing", "after", spark):
-    q3_after_df = spark.sql(sql_q3_rollup)
+    q3_after_df = spark.sql(f"""
+        SELECT machine_id,
+               COUNT(*) AS events,
+               AVG(cycle_time_ms) AS avg_cycle_ms,
+               SUM(CAST(defect_detected AS INT)) AS defects
+        FROM {table_ref('manufacturing_event')}
+        GROUP BY machine_id
+        ORDER BY events DESC, machine_id
+    """)
     q3_after_rows = q3_after_df.collect()
 
 display(spark.createDataFrame(q3_after_rows).limit(10))
@@ -649,7 +661,7 @@ restore_conf("spark.sql.adaptive.coalescePartitions.enabled")
 
 # MARKDOWN ********************
 
-# ### 💡 What Just Happened?
+# ### 💡 *What Just Happened?*
 # 
 # A large static `spark.sql.shuffle.partitions` (1000) with AQE coalescing off forced the small aggregation into **thousands of near-empty shuffle partitions**. Each partition still launches a task, so most of the wall-clock was task-scheduling overhead, not compute — a "tiny-task storm." The Stages view showed thousands of tasks processing 0 rows.
 # 
@@ -663,9 +675,9 @@ restore_conf("spark.sql.adaptive.coalescePartitions.enabled")
 
 # ---
 # 
-# ## Exercise 4 — Caching / materialization for repeated reads
+# ## **Exercise 4 — Caching / materialization for repeated reads**
 # 
-# ### Context and problem
+# ### **Context and problem**
 # 
 # Three dashboards — by order status, by part material, and by machine — are all built from the **same** expensive intermediate: inventory transactions joined to production orders and parts, then aggregated (a full scan of the large fact plus a shuffle). The baseline recomputes that scan-join-shuffle once per dashboard, so the costly shuffle runs three times. The fix uses `CACHE TABLE` to materialize the aggregated base once and reuse it; each dashboard then does a cheap additive roll-up with identical results.
 
@@ -691,14 +703,10 @@ spark.sql(f"""
     GROUP BY o.machine_id, p.part_material, o.order_status
 """)
 
-sql_q4_by_status = "SELECT order_status, SUM(transactions) AS transactions, SUM(quantity) AS quantity FROM q4_base GROUP BY order_status ORDER BY order_status"
-sql_q4_by_material = "SELECT part_material, SUM(transactions) AS transactions, SUM(quantity) AS quantity FROM q4_base GROUP BY part_material ORDER BY part_material"
-sql_q4_by_machine = "SELECT machine_id, SUM(transactions) AS transactions, SUM(quantity) AS quantity FROM q4_base GROUP BY machine_id ORDER BY machine_id"
-
 with benchmark_op("Caching / repeated reads", "before", spark):
-    q4_before_status = spark.sql(sql_q4_by_status).collect()
-    q4_before_material = spark.sql(sql_q4_by_material).collect()
-    q4_before_machine = spark.sql(sql_q4_by_machine).collect()
+    q4_before_status = spark.sql("SELECT order_status, SUM(transactions) AS transactions, SUM(quantity) AS quantity FROM q4_base GROUP BY order_status ORDER BY order_status").collect()
+    q4_before_material = spark.sql("SELECT part_material, SUM(transactions) AS transactions, SUM(quantity) AS quantity FROM q4_base GROUP BY part_material ORDER BY part_material").collect()
+    q4_before_machine = spark.sql("SELECT machine_id, SUM(transactions) AS transactions, SUM(quantity) AS quantity FROM q4_base GROUP BY machine_id ORDER BY machine_id").collect()
 
 display(spark.createDataFrame(q4_before_status))
 
@@ -717,9 +725,9 @@ display(spark.createDataFrame(q4_before_status))
 
 # Diagnosis: every dashboard re-scans, re-joins, and re-shuffles the same base; one job per collect.
 q4_before_plans = [
-    explain_string(spark.sql(sql_q4_by_status)),
-    explain_string(spark.sql(sql_q4_by_material)),
-    explain_string(spark.sql(sql_q4_by_machine)),
+    explain_string(spark.sql("SELECT order_status, SUM(transactions) AS transactions, SUM(quantity) AS quantity FROM q4_base GROUP BY order_status ORDER BY order_status")),
+    explain_string(spark.sql("SELECT part_material, SUM(transactions) AS transactions, SUM(quantity) AS quantity FROM q4_base GROUP BY part_material ORDER BY part_material")),
+    explain_string(spark.sql("SELECT machine_id, SUM(transactions) AS transactions, SUM(quantity) AS quantity FROM q4_base GROUP BY machine_id ORDER BY machine_id")),
 ]
 q4_file_scans_before = sum(plan.count("FileScan") for plan in q4_before_plans)
 print(json.dumps({
@@ -739,7 +747,7 @@ print(json.dumps({
 
 # MARKDOWN ********************
 
-# ### 🎯 Challenge
+# ### 🎯 **Challenge**
 # 
 # Materialize the expensive aggregated base once with `CACHE TABLE q4_base`, then build all three dashboards from the cached view with cheap additive roll-ups. Because the cached result is small, caching runs the costly shuffle a single time instead of three. Remember to `UNCACHE TABLE q4_base` when done.
 
@@ -767,13 +775,13 @@ set_job("4 solution cache aggregated base")
 with benchmark_op("Caching / repeated reads", "after", spark):
     spark.sql("CACHE TABLE q4_base")   # eager: runs the costly scan-join-shuffle exactly once
     q4_after_plans = [
-        explain_string(spark.sql(sql_q4_by_status)),
-        explain_string(spark.sql(sql_q4_by_material)),
-        explain_string(spark.sql(sql_q4_by_machine)),
+        explain_string(spark.sql("SELECT order_status, SUM(transactions) AS transactions, SUM(quantity) AS quantity FROM q4_base GROUP BY order_status ORDER BY order_status")),
+        explain_string(spark.sql("SELECT part_material, SUM(transactions) AS transactions, SUM(quantity) AS quantity FROM q4_base GROUP BY part_material ORDER BY part_material")),
+        explain_string(spark.sql("SELECT machine_id, SUM(transactions) AS transactions, SUM(quantity) AS quantity FROM q4_base GROUP BY machine_id ORDER BY machine_id")),
     ]
-    q4_after_status = spark.sql(sql_q4_by_status).collect()
-    q4_after_material = spark.sql(sql_q4_by_material).collect()
-    q4_after_machine = spark.sql(sql_q4_by_machine).collect()
+    q4_after_status = spark.sql("SELECT order_status, SUM(transactions) AS transactions, SUM(quantity) AS quantity FROM q4_base GROUP BY order_status ORDER BY order_status").collect()
+    q4_after_material = spark.sql("SELECT part_material, SUM(transactions) AS transactions, SUM(quantity) AS quantity FROM q4_base GROUP BY part_material ORDER BY part_material").collect()
+    q4_after_machine = spark.sql("SELECT machine_id, SUM(transactions) AS transactions, SUM(quantity) AS quantity FROM q4_base GROUP BY machine_id ORDER BY machine_id").collect()
 
 display(spark.createDataFrame(q4_after_status))
 spark.sql("UNCACHE TABLE q4_base")
@@ -819,7 +827,7 @@ assert valid, "Exercise 4 validation failed"
 
 # MARKDOWN ********************
 
-# ### 💡 What Just Happened?
+# ### 💡 *What Just Happened?*
 # 
 # A plain temporary view is **lazy** and holds no data, so each of the three dashboards triggered its own action and recomputed the shared scan-join-shuffle base from scratch. The plans showed the same `FileScan` + join + shuffle repeated once per dashboard — the expensive shuffle ran three times.
 # 
@@ -833,9 +841,9 @@ assert valid, "Exercise 4 validation failed"
 
 # ---
 # 
-# ## Exercise 5 — Python UDFs and the Native Execution Engine (NEE)
+# ## **Exercise 5 — Python UDFs and the Native Execution Engine (NEE)**
 # 
-# ### Context and problem
+# ### **Context and problem**
 # 
 # A correct top-customer query uses scalar Python UDFs registered for SQL. On the JVM this forces a Python boundary (`BatchEvalPython`) and a large slowdown — the classic "Python UDFs are slow" regression. This is an **execution-lever** fix: the code is fine, so instead of rewriting it (Module 1's code lever), simply enable the Native Execution Engine (NEE) — the Fabric default — and the same UDF code runs natively. NEE is disabled here only to reproduce the regression, then re-enabled to show the boost.
 
@@ -868,22 +876,20 @@ def python_extract_day(timestamp_str):
 spark.udf.register("python_line_total", python_line_total, DoubleType())
 spark.udf.register("python_extract_day", python_extract_day, "string")
 
-sql_q6 = f"""
-    SELECT customer_id,
-           SUM(python_line_total(line.quantity, line.unit_price, line.extended_price)) AS total_spend,
-           MAX(python_extract_day(order_date)) AS latest_day,
-           COUNT(*) AS line_count
-    FROM (
-        SELECT customer_id, order_date, EXPLODE(order_lines) AS line
-        FROM {table_ref('web_order')}
-    )
-    GROUP BY customer_id
-    ORDER BY total_spend DESC
-    LIMIT 10
-"""
-
 with benchmark_op("Python UDF engine (NEE)", "before", spark):
-    q6_before_df = spark.sql(sql_q6)
+    q6_before_df = spark.sql(f"""
+        SELECT customer_id,
+               SUM(python_line_total(line.quantity, line.unit_price, line.extended_price)) AS total_spend,
+               MAX(python_extract_day(order_date)) AS latest_day,
+               COUNT(*) AS line_count
+        FROM (
+            SELECT customer_id, order_date, EXPLODE(order_lines) AS line
+            FROM {table_ref('web_order')}
+        )
+        GROUP BY customer_id
+        ORDER BY total_spend DESC
+        LIMIT 10
+    """)
     q6_before_pdf = q6_before_df.toPandas()
 
 display(q6_before_pdf)
@@ -921,7 +927,7 @@ print(q6_before_plan[:1200])
 
 # MARKDOWN ********************
 
-# ### 🎯 Challenge
+# ### 🎯 **Challenge**
 # 
 # Enable the Native Execution Engine (`spark.native.enabled=true`, the Fabric default) and re-run the **same** UDF query — no query change. Confirm the query speeds up and the business result is unchanged.
 
@@ -929,7 +935,19 @@ print(q6_before_plan[:1200])
 
 # Challenge starter: flip NEE on and re-run the identical query.
 print("NEE currently:", spark.conf.get("spark.native.enabled"))
-q6_attempt_plan = plan_string(spark.sql(sql_q6))  # TODO: enable NEE before running
+q6_attempt_plan = plan_string(spark.sql(f"""
+    SELECT customer_id,
+           SUM(python_line_total(line.quantity, line.unit_price, line.extended_price)) AS total_spend,
+           MAX(python_extract_day(order_date)) AS latest_day,
+           COUNT(*) AS line_count
+    FROM (
+        SELECT customer_id, order_date, EXPLODE(order_lines) AS line
+        FROM {table_ref('web_order')}
+    )
+    GROUP BY customer_id
+    ORDER BY total_spend DESC
+    LIMIT 10
+"""))  # TODO: enable NEE before running
 print("Attempt has BatchEvalPython:", "BatchEvalPython" in q6_attempt_plan)
 
 # METADATA ********************
@@ -949,7 +967,19 @@ print("Attempt has BatchEvalPython:", "BatchEvalPython" in q6_attempt_plan)
 spark.conf.set("spark.native.enabled", "true")
 
 with benchmark_op("Python UDF engine (NEE)", "after", spark):
-    q6_after_df = spark.sql(sql_q6)
+    q6_after_df = spark.sql(f"""
+        SELECT customer_id,
+               SUM(python_line_total(line.quantity, line.unit_price, line.extended_price)) AS total_spend,
+               MAX(python_extract_day(order_date)) AS latest_day,
+               COUNT(*) AS line_count
+        FROM (
+            SELECT customer_id, order_date, EXPLODE(order_lines) AS line
+            FROM {table_ref('web_order')}
+        )
+        GROUP BY customer_id
+        ORDER BY total_spend DESC
+        LIMIT 10
+    """)
     q6_after_pdf = q6_after_df.toPandas()
 
 display(q6_after_pdf)
@@ -991,7 +1021,7 @@ restore_conf("spark.native.enabled")
 
 # MARKDOWN ********************
 
-# ### 💡 What Just Happened?
+# ### 💡 *What Just Happened?*
 # 
 # The UDF code was perfectly correct — the slowdown came from **where it ran**. With `spark.native.enabled=false`, the scalar Python UDFs executed on the JVM behind a `BatchEvalPython` boundary (per-row serialization to a Python worker), reproducing the classic "Python UDFs are slow" regression.
 # 
@@ -1005,7 +1035,7 @@ restore_conf("spark.native.enabled")
 
 # ---
 # 
-# # 🏆 Performance Impact by Exercise
+# # 🏆 **Performance Impact by Exercise**
 # 
 # Execute the below to see the full impact across every exercise.
 # 
@@ -1026,7 +1056,7 @@ print_benchmark_summary()
 
 # ---
 # 
-# ## Summary — Optimizing how Spark runs (Spark SQL)
+# ## **Summary — Optimizing how Spark runs (Spark SQL)**
 # 
 # You tuned execution without changing source tables or business logic, using SQL throughout:
 # 
