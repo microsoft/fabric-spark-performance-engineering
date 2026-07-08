@@ -38,8 +38,11 @@ def configure_logging(debug):
         format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
         handlers=[logging.StreamHandler(sys.stdout)],
     )
-    logging.getLogger("fsspec_wrapper.trident.core").setLevel(logging.WARNING)
-    logging.getLogger("azure.core.pipeline.policies.http_logging_policy").setLevel(logging.WARNING)
+    # Only show INFO for arcflow/lakegen, silence everything else
+    logging.getLogger().setLevel(logging.WARNING)
+    logging.getLogger("arcflow").setLevel(logging.INFO)
+    logging.getLogger("lakegen").setLevel(logging.INFO)
+    logging.getLogger("__main__").setLevel(logging.INFO)
     return logging.getLogger(__name__)
 
 
