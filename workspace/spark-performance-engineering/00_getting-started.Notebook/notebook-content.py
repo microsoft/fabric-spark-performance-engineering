@@ -53,6 +53,9 @@
 # schema has fact tables (manufacturing events, orders, inventory transactions) at the center and
 # dimensions (parts, colors, themes, sets) on the periphery.
 # 
+# ![Manufacturing and Sales Schema](https://github.com/microsoft/fabric-spark-performance-engineering/blob/main/assets/toy_bricks_erd.png?raw=true)
+# 
+# 
 # > 💡 The biggest fact table is `manufacturing_event` (~8 M rows / ~350 MB). Most performance
 # > exercises target it because it's the only table large enough to make Spark break a sweat at
 # > lab scale on a single node.
@@ -77,7 +80,7 @@
 # 
 # > 🔁 **Re-run anytime.** The job is incremental — run it multiple times to generate larger lab data. By default it runs for 30 minutes and then stops.
 # 
-# Move on to Module 1 once the Spark Job Definition run shows as **Succeeded**. It will run for approximately 30 minutes to generate tables which enough commits that can be used to illustrate real-world performance challenges.
+# Move on to Module 1 once the Spark Job Definition run shows as **Succeeded**. In order to illustrate real-world performance challenges, it will run for approximately 30 minutes to generate tables with hundreds of transactions.
 
 
 # MARKDOWN ********************
