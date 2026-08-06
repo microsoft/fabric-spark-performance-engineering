@@ -1,5 +1,5 @@
 {
-  "executableFile": "unoptimized_elt.py",
+  "executableFile": "unoptimized_main.py",
   "defaultLakehouseArtifactId": "28f1e957-ea23-49e8-846b-be0d8a67412e",
   "mainClass": "",
   "additionalLakehouseIds": [],
