@@ -542,9 +542,7 @@ print(f"{'=' * 60}")
 
 benchmarks["Exercise 2: Optimize Write"] = {
     "before_s": new_files_without_ow, "after_s": new_files_with_ow,
-    "speedup": round(new_files_without_ow / max(new_files_with_ow, 1), 1),
-    "before_files": new_files_without_ow, "after_files": new_files_with_ow,
-    "note": "files created per append"
+    "before_files": new_files_without_ow, "after_files": new_files_with_ow
 }
 
 # METADATA ********************
